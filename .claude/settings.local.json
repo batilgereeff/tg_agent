@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Read(//tmp/**)",
+      "Bash(jobs -l)",
+      "Bash(tee /tmp/bot.log)",
+      "Bash(pkill -f \"python3 main.py\")"
+    ]
+  }
+}
