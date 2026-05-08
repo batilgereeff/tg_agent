@@ -38,7 +38,7 @@ def fmt_deadline(deadline: Optional[str]) -> str:
 
 
 def _fmt_task(t: dict) -> dict:
-    return {
+    result = {
         "id": t["id"],
         "employee": t.get("employee_name", ""),
         "description": t["description"],
@@ -48,6 +48,11 @@ def _fmt_task(t: dict) -> dict:
         "created_at": t.get("created_at", ""),
         "completed_at": t.get("completed_at", ""),
     }
+    if t.get("category"):
+        result["category"] = t["category"]
+    if t.get("comment"):
+        result["comment"] = t["comment"]
+    return result
 
 
 # ── Tool schemas ───────────────────────────────────────────────────────────────

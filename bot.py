@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -30,6 +31,18 @@ router = Router()
 
 _histories: dict[int, list[dict]] = {}
 _MAX_HISTORY = 20
+
+
+async def _safe_edit(msg, text: str | None = None, markup=None) -> None:
+    """Edit message text or markup, silently ignoring Telegram 'not modified' errors."""
+    try:
+        if text is not None:
+            await msg.edit_text(text, reply_markup=markup)
+        else:
+            await msg.edit_reply_markup(reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e).lower():
+            logger.warning("Edit failed: %s", e)
 
 
 # ── Persistent reply keyboards ─────────────────────────────────────────────────
@@ -437,7 +450,7 @@ async def wiz_start(message: Message, fsm: FSMContext) -> None:
 @router.callback_query(F.data == "tw:cancel")
 async def wiz_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
     await fsm.clear()
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
     await callback.answer()
 
@@ -456,7 +469,7 @@ async def wiz_cb_employee(callback: CallbackQuery, fsm: FSMContext) -> None:
         employee_name=emp["name"],
         employee_telegram_id=emp.get("telegram_id"),
     )
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     if (await fsm.get_data()).get("editing"):
         await fsm.set_state(TaskWizard.confirm)
         await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
@@ -488,7 +501,7 @@ async def wiz_description(message: Message, fsm: FSMContext) -> None:
 @router.callback_query(F.data.startswith("tw:dl:"), StateFilter(TaskWizard.choose_deadline))
 async def wiz_cb_deadline(callback: CallbackQuery, fsm: FSMContext) -> None:
     preset = callback.data.split(":")[-1]
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
 
     if preset == "manual":
         await fsm.set_state(TaskWizard.enter_deadline_manual)
@@ -536,7 +549,7 @@ async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
 async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
     priority = callback.data.split(":")[-1]
     await fsm.update_data(priority=priority)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     if (await fsm.get_data()).get("editing"):
         await fsm.set_state(TaskWizard.confirm)
         await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
@@ -555,7 +568,7 @@ async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
 async def wiz_cb_category(callback: CallbackQuery, fsm: FSMContext) -> None:
     category = callback.data.split(":")[-1]
     await fsm.update_data(category=category)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     if (await fsm.get_data()).get("editing"):
         await fsm.set_state(TaskWizard.confirm)
         await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
@@ -582,7 +595,7 @@ async def wiz_comment(message: Message, fsm: FSMContext) -> None:
 async def wiz_cb_skip_comment(callback: CallbackQuery, fsm: FSMContext) -> None:
     await fsm.update_data(comment=None)
     await fsm.set_state(TaskWizard.confirm)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
     await callback.answer()
 
@@ -593,7 +606,7 @@ async def wiz_cb_skip_comment(callback: CallbackQuery, fsm: FSMContext) -> None:
 async def wiz_cb_confirm(callback: CallbackQuery, fsm: FSMContext, bot: Bot) -> None:
     data = await fsm.get_data()
     await fsm.clear()
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     reply = await _do_create_task_fsm(data, bot)
     await callback.message.answer(reply, reply_markup=_ADMIN_KB)
     await callback.answer()
@@ -602,7 +615,7 @@ async def wiz_cb_confirm(callback: CallbackQuery, fsm: FSMContext, bot: Bot) -> 
 @router.callback_query(F.data == "tw:edit", StateFilter(TaskWizard.confirm))
 async def wiz_cb_edit(callback: CallbackQuery, fsm: FSMContext) -> None:
     await fsm.set_state(TaskWizard.edit_field)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Что изменить?", reply_markup=_wiz_edit_field_kb())
     await callback.answer()
 
@@ -611,7 +624,7 @@ async def wiz_cb_edit(callback: CallbackQuery, fsm: FSMContext) -> None:
 async def wiz_cb_edit_field(callback: CallbackQuery, fsm: FSMContext) -> None:
     field = callback.data.split(":")[-1]
     await fsm.update_data(editing=True)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
 
     if field == "employee":
         employees = await db.list_employees()
@@ -733,10 +746,9 @@ async def handle_emp_list_btn(message: Message) -> None:
 @router.callback_query(F.data == "em:list")
 async def em_cb_list(callback: CallbackQuery) -> None:
     employees = await db.list_employees()
-    if employees:
-        await callback.message.edit_text("Выберите сотрудника:", reply_markup=_emp_list_kb(employees))
-    else:
-        await callback.message.edit_text("Нет сотрудников.")
+    text = "Выберите сотрудника:" if employees else "Нет сотрудников."
+    kb = _emp_list_kb(employees) if employees else None
+    await _safe_edit(callback.message, text=text, markup=kb)
     await callback.answer()
 
 
@@ -750,7 +762,7 @@ async def em_cb_card(callback: CallbackQuery) -> None:
         await callback.answer("Сотрудник не найден.", show_alert=True)
         return
     stats = await db.get_employee_stats(emp_id)
-    await callback.message.edit_text(_format_emp_card(emp, stats), reply_markup=_emp_card_kb(emp_id))
+    await _safe_edit(callback.message, text=_format_emp_card(emp, stats), markup=_emp_card_kb(emp_id))
     await callback.answer()
 
 
@@ -777,7 +789,7 @@ async def em_cb_tasks(callback: CallbackQuery) -> None:
             desc = t["description"][:50] + ("…" if len(t["description"]) > 50 else "")
             lines.append(f"#{t['id']} | {status_label} | {desc} | {dl}")
         text = "\n".join(lines)[:4000]
-    await callback.message.edit_text(text, reply_markup=back_kb)
+    await _safe_edit(callback.message, text=text, markup=back_kb)
     await callback.answer()
 
 
@@ -792,9 +804,10 @@ async def em_cb_rename(callback: CallbackQuery, fsm: FSMContext) -> None:
         return
     await fsm.set_state(EmpWizard.rename)
     await fsm.update_data(emp_id=emp_id)
-    await callback.message.edit_text(
-        f"Введите новое имя для {emp['name']}:",
-        reply_markup=_emp_cancel_kb(),
+    await _safe_edit(
+        callback.message,
+        text=f"Введите новое имя для {emp['name']}:",
+        markup=_emp_cancel_kb(),
     )
     await callback.answer()
 
@@ -811,14 +824,14 @@ async def em_cb_delete(callback: CallbackQuery) -> None:
     stats = await db.get_employee_stats(emp_id)
     active = stats["active"]
     if active:
-        n = active
-        suffix = "а" if n == 1 else "и" if 2 <= n <= 4 else ""
-        warning = f" У него {n} активных задач{suffix}. Они будут отменены."
+        suffix = "а" if active == 1 else "и" if 2 <= active <= 4 else ""
+        warning = f" У него {active} активных задач{suffix}. Они будут отменены."
     else:
         warning = ""
-    await callback.message.edit_text(
-        f"Удалить {emp['name']}?{warning}",
-        reply_markup=_emp_delete_kb(emp_id),
+    await _safe_edit(
+        callback.message,
+        text=f"Удалить {emp['name']}?{warning}",
+        markup=_emp_delete_kb(emp_id),
     )
     await callback.answer()
 
@@ -830,19 +843,20 @@ async def em_cb_delete_ok(callback: CallbackQuery) -> None:
     emp_id = int(callback.data.split(":")[-1])
     emp = await db.get_employee_by_id(emp_id)
     if not emp:
+        await _safe_edit(callback.message, markup=None)
         await callback.answer("Сотрудник уже удалён.", show_alert=True)
-        await callback.message.edit_reply_markup(reply_markup=None)
         return
     name = emp["name"]
     await db.delete_employee(emp_id)
     employees = await db.list_employees()
     if employees:
-        await callback.message.edit_text(
-            f"Сотрудник {name} удалён.\n\nВыберите сотрудника:",
-            reply_markup=_emp_list_kb(employees),
+        await _safe_edit(
+            callback.message,
+            text=f"Сотрудник {name} удалён.\n\nВыберите сотрудника:",
+            markup=_emp_list_kb(employees),
         )
     else:
-        await callback.message.edit_text(f"Сотрудник {name} удалён. Список пуст.")
+        await _safe_edit(callback.message, text=f"Сотрудник {name} удалён. Список пуст.")
     await callback.answer(f"{name} удалён.")
 
 
@@ -862,7 +876,7 @@ async def em_cb_newcode(callback: CallbackQuery) -> None:
     back_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="← К сотруднику", callback_data=f"em:card:{emp_id}")]
     ])
-    await callback.message.edit_text(text, reply_markup=back_kb)
+    await _safe_edit(callback.message, text=text, markup=back_kb)
     await callback.answer()
 
 
@@ -877,16 +891,14 @@ async def em_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
         emp = await db.get_employee_by_id(emp_id)
         if emp:
             stats = await db.get_employee_stats(emp_id)
-            await callback.message.edit_text(
-                _format_emp_card(emp, stats), reply_markup=_emp_card_kb(emp_id)
-            )
+            await _safe_edit(callback.message,
+                             text=_format_emp_card(emp, stats), markup=_emp_card_kb(emp_id))
             await callback.answer()
             return
     employees = await db.list_employees()
-    if employees:
-        await callback.message.edit_text("Выберите сотрудника:", reply_markup=_emp_list_kb(employees))
-    else:
-        await callback.message.edit_text("Нет сотрудников.")
+    text = "Выберите сотрудника:" if employees else "Нет сотрудников."
+    kb = _emp_list_kb(employees) if employees else None
+    await _safe_edit(callback.message, text=text, markup=kb)
     await callback.answer()
 
 
@@ -940,22 +952,22 @@ async def cb_task_confirm(callback: CallbackQuery, bot: Bot) -> None:
 
     if action == "yes":
         if not pending:
+            await _safe_edit(callback.message, markup=None)
             await callback.answer("Запрос устарел.", show_alert=True)
-            await callback.message.edit_reply_markup(reply_markup=None)
             return
         reply = await _do_create_task(admin_id, pending, bot)
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await _safe_edit(callback.message, markup=None)
         await callback.message.answer(reply, reply_markup=_ADMIN_KB)
         _save_history(admin_id, "Да", reply)
     elif action == "edit":
         _st.clear_pending(admin_id)
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await _safe_edit(callback.message, markup=None)
         await callback.message.answer(
             "Что хотите изменить? Напишите и я пересоздам карточку.", reply_markup=_ADMIN_KB
         )
     elif action == "cancel":
         _st.clear_pending(admin_id)
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await _safe_edit(callback.message, markup=None)
         reply = "Создание задачи отменено."
         await callback.message.answer(reply, reply_markup=_ADMIN_KB)
         _save_history(admin_id, "Отмена", reply)
@@ -979,7 +991,7 @@ async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
         bot=bot,
     )
     data = json.loads(result_json)
-    await callback.message.edit_reply_markup(reply_markup=None)
+    await _safe_edit(callback.message, markup=None)
 
     if data.get("ok"):
         reply = (f"Задача #{task_id} подтверждена и закрыта."
