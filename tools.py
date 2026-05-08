@@ -1,324 +1,401 @@
 import json
+import logging
+from datetime import datetime
 from typing import Optional
-import database as db
 
-TOOL_SCHEMAS = [
-    # ── CRM: Contacts ──────────────────────────────────────────────────────────
+import database as db
+import state
+from config import ADMIN_ID
+
+logger = logging.getLogger(__name__)
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+STATUS_RU = {
+    "new": "новая",
+    "in_progress": "в работе",
+    "review": "на проверке",
+    "done": "выполнена",
+    "overdue": "просрочена",
+}
+
+PRIORITY_RU = {
+    "low": "низкий",
+    "normal": "обычный",
+    "high": "высокий",
+    "critical": "критический",
+}
+
+
+def fmt_deadline(deadline: Optional[str]) -> str:
+    if not deadline:
+        return ""
+    try:
+        return datetime.fromisoformat(deadline).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, TypeError):
+        return deadline
+
+
+def _fmt_task(t: dict) -> dict:
+    return {
+        "id": t["id"],
+        "employee": t.get("employee_name", ""),
+        "description": t["description"],
+        "deadline": fmt_deadline(t.get("deadline")) or "без дедлайна",
+        "priority": PRIORITY_RU.get(t.get("priority", "normal"), "обычный"),
+        "status": STATUS_RU.get(t["status"], t["status"]),
+        "created_at": t.get("created_at", ""),
+        "completed_at": t.get("completed_at", ""),
+    }
+
+
+# ── Tool schemas ───────────────────────────────────────────────────────────────
+
+ADMIN_TOOL_SCHEMAS = [
     {
-        "name": "add_contact",
-        "description": "Добавить новый контакт в CRM",
+        "name": "add_employee",
+        "description": "Добавить нового сотрудника. Генерирует 6-значный код регистрации.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "name":    {"type": "string", "description": "Полное имя контакта"},
-                "phone":   {"type": "string", "description": "Номер телефона"},
-                "email":   {"type": "string", "description": "Email адрес"},
-                "company": {"type": "string", "description": "Название компании"},
-                "notes":   {"type": "string", "description": "Заметки"},
+                "name": {"type": "string", "description": "Имя или фамилия сотрудника"},
             },
             "required": ["name"],
         },
     },
     {
-        "name": "search_contacts",
-        "description": "Поиск контактов по имени, телефону, email или компании",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Поисковый запрос"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_contact",
-        "description": "Получить детальную информацию о контакте вместе с его сделками",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "contact_id": {"type": "integer", "description": "ID контакта"},
-            },
-            "required": ["contact_id"],
-        },
-    },
-    # ── CRM: Deals ─────────────────────────────────────────────────────────────
-    {
-        "name": "create_deal",
-        "description": "Создать новую сделку для контакта",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "contact_id": {"type": "integer", "description": "ID контакта"},
-                "title":      {"type": "string",  "description": "Название сделки"},
-                "amount":     {"type": "number",  "description": "Сумма сделки"},
-                "status":     {
-                    "type": "string",
-                    "description": "Статус сделки",
-                    "enum": ["new", "in_progress", "won", "lost"],
-                },
-                "notes": {"type": "string", "description": "Заметки к сделке"},
-            },
-            "required": ["contact_id", "title"],
-        },
-    },
-    {
-        "name": "update_deal",
-        "description": "Обновить статус, сумму или заметки сделки",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "deal_id": {"type": "integer", "description": "ID сделки"},
-                "status":  {
-                    "type": "string",
-                    "description": "Новый статус",
-                    "enum": ["new", "in_progress", "won", "lost"],
-                },
-                "amount": {"type": "number", "description": "Новая сумма"},
-                "notes":  {"type": "string", "description": "Обновлённые заметки"},
-            },
-            "required": ["deal_id"],
-        },
-    },
-    {
-        "name": "list_deals",
-        "description": "Получить список сделок с фильтрацией по контакту или статусу",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "contact_id": {"type": "integer", "description": "Фильтр по ID контакта"},
-                "status":     {"type": "string",  "description": "Фильтр по статусу: new, in_progress, won, lost"},
-            },
-        },
-    },
-    # ── Tickets ────────────────────────────────────────────────────────────────
-    {
-        "name": "create_ticket",
-        "description": "Создать новую заявку",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title":       {"type": "string", "description": "Название заявки"},
-                "description": {"type": "string", "description": "Подробное описание"},
-                "assignee":    {"type": "string", "description": "Исполнитель (имя или username)"},
-                "priority":    {
-                    "type": "string",
-                    "description": "Приоритет",
-                    "enum": ["low", "medium", "high", "critical"],
-                },
-            },
-            "required": ["title"],
-        },
-    },
-    {
-        "name": "update_ticket",
-        "description": "Обновить статус, исполнителя или приоритет заявки",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ticket_id": {"type": "integer", "description": "ID заявки"},
-                "status":    {
-                    "type": "string",
-                    "description": "Новый статус",
-                    "enum": ["open", "in_progress", "resolved", "closed"],
-                },
-                "assignee": {"type": "string", "description": "Новый исполнитель"},
-                "priority": {
-                    "type": "string",
-                    "description": "Новый приоритет",
-                    "enum": ["low", "medium", "high", "critical"],
-                },
-            },
-            "required": ["ticket_id"],
-        },
-    },
-    {
-        "name": "list_tickets",
-        "description": "Получить список заявок с фильтрацией",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status":   {"type": "string", "description": "Фильтр по статусу: open, in_progress, resolved, closed"},
-                "assignee": {"type": "string", "description": "Фильтр по исполнителю"},
-                "priority": {"type": "string", "description": "Фильтр по приоритету: low, medium, high, critical"},
-            },
-        },
-    },
-    # ── Broadcasts ─────────────────────────────────────────────────────────────
-    {
-        "name": "create_broadcast_group",
-        "description": "Создать новую группу для рассылки",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Название группы"},
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "list_broadcast_groups",
-        "description": "Получить список всех групп рассылки с количеством участников",
+        "name": "list_employees",
+        "description": "Список всех сотрудников с их статусом регистрации.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
-        "name": "add_member_to_group",
-        "description": "Добавить пользователя Telegram в группу рассылки",
+        "name": "propose_task",
+        "description": (
+            "Сформировать карточку задачи для подтверждения. "
+            "Задача НЕ создаётся — только показывается карточка. "
+            "После показа нужно дождаться ответа: Да / Нет / Изменить."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "group_name":       {"type": "string",  "description": "Название группы"},
-                "telegram_user_id": {"type": "integer", "description": "Telegram ID пользователя"},
-                "username":         {"type": "string",  "description": "Username пользователя (опционально)"},
+                "employee_name": {"type": "string", "description": "Имя сотрудника"},
+                "description":   {"type": "string", "description": "Описание задачи"},
+                "deadline": {
+                    "type": "string",
+                    "description": "Дедлайн в формате ISO 8601 (YYYY-MM-DDTHH:MM:SS)",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high", "critical"],
+                    "description": "Приоритет задачи",
+                },
             },
-            "required": ["group_name", "telegram_user_id"],
+            "required": ["employee_name", "description"],
         },
     },
     {
-        "name": "remove_member_from_group",
-        "description": "Удалить пользователя из группы рассылки",
+        "name": "get_team_stats",
+        "description": (
+            "Сводная статистика: итого по статусам, разбивка по сотрудникам, "
+            "список просроченных задач. Вызывать при словах: таблица, статистика, сводка."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_tasks",
+        "description": "Список задач с фильтрацией по сотруднику и/или статусу.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "group_name":       {"type": "string",  "description": "Название группы"},
-                "telegram_user_id": {"type": "integer", "description": "Telegram ID пользователя"},
+                "employee_name": {"type": "string", "description": "Имя сотрудника"},
+                "status": {
+                    "type": "string",
+                    "description": "Статус: new, in_progress, review, done, overdue",
+                },
             },
-            "required": ["group_name", "telegram_user_id"],
         },
     },
     {
-        "name": "send_broadcast",
-        "description": "Отправить сообщение всем участникам группы рассылки через Telegram",
+        "name": "get_task",
+        "description": "Детальная информация о задаче по ID.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "group_name": {"type": "string", "description": "Название группы"},
-                "message":    {"type": "string", "description": "Текст сообщения"},
+                "task_id": {"type": "integer", "description": "ID задачи"},
             },
-            "required": ["group_name", "message"],
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "send_reminder",
+        "description": "Вручную отправить сотруднику напоминание о задаче.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+                "custom_message": {"type": "string", "description": "Кастомный текст (необязательно)"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "confirm_task",
+        "description": "Подтвердить выполнение задачи. Статус становится 'выполнена'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "reject_task",
+        "description": "Отклонить задачу, вернуть в работу. Сотрудник получит уведомление.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+                "comment": {"type": "string", "description": "Причина отклонения"},
+            },
+            "required": ["task_id"],
+        },
+    },
+]
+
+EMPLOYEE_TOOL_SCHEMAS = [
+    {
+        "name": "my_tasks",
+        "description": "Список моих задач с фильтром по статусу.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Статус: new, in_progress, review, done, overdue",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_task",
+        "description": "Детальная информация о задаче по ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "start_task",
+        "description": "Взять задачу в работу (статус → в работе).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "submit_task",
+        "description": "Отправить задачу на проверку администратору (статус → на проверке).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer", "description": "ID задачи"},
+            },
+            "required": ["task_id"],
         },
     },
 ]
 
 
-async def execute_tool(name: str, input_data: dict, bot=None) -> str:
+# ── Tool executor ──────────────────────────────────────────────────────────────
+
+async def execute_tool(name: str, input_data: dict, caller_id: int = 0, bot=None) -> str:
     try:
-        if name == "add_contact":
-            result = await db.add_contact(
-                name=input_data["name"],
-                phone=input_data.get("phone", ""),
-                email=input_data.get("email", ""),
-                company=input_data.get("company", ""),
-                notes=input_data.get("notes", ""),
+        # ── Admin tools ──────────────────────────────────────────────────────
+        if name == "add_employee":
+            emp = await db.create_employee(input_data["name"])
+            return json.dumps({
+                "id": emp["id"],
+                "name": emp["name"],
+                "reg_code": emp["reg_code"],
+                "instruction": f"Сотрудник пишет боту: /start {emp['reg_code']}",
+            }, ensure_ascii=False)
+
+        elif name == "list_employees":
+            rows = await db.list_employees()
+            return json.dumps([
+                {
+                    "id": e["id"],
+                    "name": e["name"],
+                    "registered": bool(e["telegram_id"]),
+                    "reg_code": e["reg_code"] if not e["telegram_id"] else None,
+                }
+                for e in rows
+            ], ensure_ascii=False)
+
+        elif name == "propose_task":
+            matches = await db.find_employees_by_name(input_data["employee_name"])
+            if not matches:
+                return json.dumps({"error": f"Сотрудник '{input_data['employee_name']}' не найден"})
+            if len(matches) > 1:
+                return json.dumps({"error": f"Найдено несколько: {[e['name'] for e in matches]}. Уточните имя."})
+            emp = matches[0]
+            deadline = input_data.get("deadline")
+            priority = input_data.get("priority", "normal")
+
+            state.set_pending(caller_id, {
+                "employee_id":         emp["id"],
+                "employee_name":       emp["name"],
+                "employee_telegram_id": emp["telegram_id"],
+                "description":         input_data["description"],
+                "deadline":            deadline,
+                "priority":            priority,
+            })
+
+            card = (
+                f"Проверьте задачу:\n\n"
+                f"Сотрудник: {emp['name']}\n"
+                f"Задача: {input_data['description']}\n"
+                f"Дедлайн: {fmt_deadline(deadline) or 'не указан'}\n"
+                f"Приоритет: {PRIORITY_RU.get(priority, priority)}\n\n"
+                f"Все верно? Ответьте: Да, Нет или Изменить"
             )
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps({"pending": True, "card": card}, ensure_ascii=False)
 
-        elif name == "search_contacts":
-            result = await db.search_contacts(input_data["query"])
-            return json.dumps(result, ensure_ascii=False)
+        elif name == "get_team_stats":
+            stats = await db.get_team_stats()
+            for t in stats["overdue_tasks"]:
+                t["deadline"] = fmt_deadline(t.get("deadline")) or "без дедлайна"
+            return json.dumps(stats, ensure_ascii=False)
 
-        elif name == "get_contact":
-            contact = await db.get_contact(input_data["contact_id"])
-            if not contact:
-                return json.dumps({"error": "Контакт не найден"})
-            deals = await db.list_deals(contact_id=input_data["contact_id"])
-            return json.dumps({**contact, "deals": deals}, ensure_ascii=False)
+        elif name == "list_tasks":
+            employee_id = None
+            if input_data.get("employee_name"):
+                matches = await db.find_employees_by_name(input_data["employee_name"])
+                if not matches:
+                    return json.dumps({"error": "Сотрудник не найден"})
+                employee_id = matches[0]["id"]
+            tasks = await db.list_tasks(employee_id=employee_id, status=input_data.get("status"))
+            return json.dumps([_fmt_task(t) for t in tasks], ensure_ascii=False)
 
-        elif name == "create_deal":
-            result = await db.create_deal(
-                contact_id=input_data["contact_id"],
-                title=input_data["title"],
-                amount=input_data.get("amount", 0),
-                status=input_data.get("status", "new"),
-                notes=input_data.get("notes", ""),
-            )
-            return json.dumps(result, ensure_ascii=False)
+        elif name == "get_task":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            return json.dumps(_fmt_task(task), ensure_ascii=False)
 
-        elif name == "update_deal":
-            result = await db.update_deal(
-                deal_id=input_data["deal_id"],
-                status=input_data.get("status"),
-                amount=input_data.get("amount"),
-                notes=input_data.get("notes"),
-            )
-            if not result:
-                return json.dumps({"error": "Сделка не найдена"})
-            return json.dumps(result, ensure_ascii=False)
+        elif name == "send_reminder":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            tg_id = task.get("employee_telegram_id")
+            if not tg_id:
+                return json.dumps({"error": "Сотрудник ещё не зарегистрирован в Telegram"})
+            if not bot:
+                return json.dumps({"error": "Bot недоступен"})
+            custom = input_data.get("custom_message")
+            if custom:
+                text = custom
+            else:
+                deadline_str = fmt_deadline(task.get("deadline"))
+                text = (
+                    f"Напоминание от администратора\n\n"
+                    f"Задача #{task['id']}: {task['description']}"
+                    + (f"\nДедлайн: {deadline_str}" if deadline_str else "")
+                    + f"\nСтатус: {STATUS_RU.get(task['status'], task['status'])}"
+                )
+            await bot.send_message(tg_id, text)
+            return json.dumps({"sent": True, "to": task["employee_name"]}, ensure_ascii=False)
 
-        elif name == "list_deals":
-            result = await db.list_deals(
-                contact_id=input_data.get("contact_id"),
-                status=input_data.get("status"),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "create_ticket":
-            result = await db.create_ticket(
-                title=input_data["title"],
-                description=input_data.get("description", ""),
-                assignee=input_data.get("assignee", ""),
-                priority=input_data.get("priority", "medium"),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "update_ticket":
-            result = await db.update_ticket(
-                ticket_id=input_data["ticket_id"],
-                status=input_data.get("status"),
-                assignee=input_data.get("assignee"),
-                priority=input_data.get("priority"),
-            )
-            if not result:
-                return json.dumps({"error": "Заявка не найдена"})
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "list_tickets":
-            result = await db.list_tickets(
-                status=input_data.get("status"),
-                assignee=input_data.get("assignee"),
-                priority=input_data.get("priority"),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "create_broadcast_group":
-            result = await db.create_broadcast_group(input_data["name"])
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "list_broadcast_groups":
-            result = await db.list_broadcast_groups()
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "add_member_to_group":
-            result = await db.add_member_to_group(
-                group_name=input_data["group_name"],
-                telegram_user_id=input_data["telegram_user_id"],
-                username=input_data.get("username", ""),
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "remove_member_from_group":
-            result = await db.remove_member_from_group(
-                group_name=input_data["group_name"],
-                telegram_user_id=input_data["telegram_user_id"],
-            )
-            return json.dumps(result, ensure_ascii=False)
-
-        elif name == "send_broadcast":
-            if bot is None:
-                return json.dumps({"error": "Bot instance не доступен"})
-            members = await db.get_group_members(input_data["group_name"])
-            if not members:
-                return json.dumps({"error": f"Группа '{input_data['group_name']}' не найдена или пуста"})
-            sent, failed = 0, 0
-            for member in members:
+        elif name == "confirm_task":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            if task["status"] == "done":
+                return json.dumps({"error": "Задача уже выполнена"})
+            now = datetime.now().isoformat(timespec="seconds")
+            task = await db.update_task_status(input_data["task_id"], "done", completed_at=now)
+            if bot and task.get("employee_telegram_id"):
                 try:
-                    await bot.send_message(member["telegram_user_id"], input_data["message"])
-                    sent += 1
-                except Exception:
-                    failed += 1
-            return json.dumps({"sent": sent, "failed": failed, "total": len(members), "group": input_data["group_name"]}, ensure_ascii=False)
+                    await bot.send_message(
+                        task["employee_telegram_id"],
+                        f"Задача #{task['id']} подтверждена администратором.\n\n{task['description']}",
+                    )
+                except Exception as e:
+                    logger.warning("Notify employee failed: %s", e)
+            return json.dumps({"ok": True, "task_id": task["id"], "completed_at": now}, ensure_ascii=False)
+
+        elif name == "reject_task":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            task = await db.update_task_status(input_data["task_id"], "in_progress")
+            comment = input_data.get("comment", "")
+            if bot and task.get("employee_telegram_id"):
+                try:
+                    await bot.send_message(
+                        task["employee_telegram_id"],
+                        f"Задача #{task['id']} возвращена на доработку."
+                        + (f"\n\nКомментарий: {comment}" if comment else ""),
+                    )
+                except Exception as e:
+                    logger.warning("Notify employee failed: %s", e)
+            return json.dumps({"ok": True, "task_id": task["id"], "status": "in_progress"}, ensure_ascii=False)
+
+        # ── Employee tools ───────────────────────────────────────────────────
+        elif name == "my_tasks":
+            emp = await db.get_employee_by_telegram_id(caller_id)
+            if not emp:
+                return json.dumps({"error": "Вы не зарегистрированы"})
+            tasks = await db.list_tasks(employee_id=emp["id"], status=input_data.get("status"))
+            return json.dumps([_fmt_task(t) for t in tasks], ensure_ascii=False)
+
+        elif name == "start_task":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            emp = await db.get_employee_by_telegram_id(caller_id)
+            if not emp or task["employee_id"] != emp["id"]:
+                return json.dumps({"error": "Это не ваша задача"})
+            task = await db.update_task_status(input_data["task_id"], "in_progress")
+            return json.dumps({"ok": True, "task_id": task["id"], "status": "in_progress"}, ensure_ascii=False)
+
+        elif name == "submit_task":
+            task = await db.get_task(input_data["task_id"])
+            if not task:
+                return json.dumps({"error": f"Задача #{input_data['task_id']} не найдена"})
+            emp = await db.get_employee_by_telegram_id(caller_id)
+            if not emp or task["employee_id"] != emp["id"]:
+                return json.dumps({"error": "Это не ваша задача"})
+            if task["status"] == "done":
+                return json.dumps({"error": "Задача уже выполнена"})
+            task = await db.update_task_status(input_data["task_id"], "review")
+            if bot and ADMIN_ID:
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                review_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Подтвердить ✓",      callback_data=f"tr:ok:{task['id']}"),
+                    InlineKeyboardButton(text="Вернуть в работу ↩", callback_data=f"tr:reject:{task['id']}"),
+                ]])
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"{task['employee_name']} выполнил задачу #{task['id']}:\n\n"
+                        f"{task['description']}",
+                        reply_markup=review_kb,
+                    )
+                except Exception as e:
+                    logger.warning("Notify admin failed: %s", e)
+            return json.dumps({"ok": True, "task_id": task["id"], "status": "review"}, ensure_ascii=False)
 
         else:
             return json.dumps({"error": f"Неизвестный инструмент: {name}"})
 
     except Exception as exc:
+        logger.error("Tool '%s' error: %s", name, exc, exc_info=True)
         return json.dumps({"error": str(exc)})
