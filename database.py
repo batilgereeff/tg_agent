@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     description       TEXT NOT NULL,
     deadline          TEXT,
     priority          TEXT DEFAULT 'normal',
+    category          TEXT,
+    comment           TEXT,
     status            TEXT DEFAULT 'new',
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at      TEXT,
@@ -27,16 +29,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 """
 
+_MIGRATIONS = [
+    "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'",
+    "ALTER TABLE tasks ADD COLUMN category TEXT",
+    "ALTER TABLE tasks ADD COLUMN comment  TEXT",
+]
+
 
 async def init_db() -> None:
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         await conn.executescript(_SCHEMA)
-        # Safe migration: add priority if upgrading from older schema
-        try:
-            await conn.execute("ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'")
-            await conn.commit()
-        except aiosqlite.OperationalError:
-            pass
+        for sql in _MIGRATIONS:
+            try:
+                await conn.execute(sql)
+                await conn.commit()
+            except aiosqlite.OperationalError:
+                pass
 
 
 # ── Employees ──────────────────────────────────────────────────────────────────
@@ -124,17 +132,21 @@ async def create_task(
     description: str,
     deadline: Optional[str] = None,
     priority: str = "normal",
+    category: Optional[str] = None,
+    comment: Optional[str] = None,
 ) -> dict:
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         cur = await conn.execute(
-            "INSERT INTO tasks (employee_id, description, deadline, priority) VALUES (?, ?, ?, ?)",
-            (employee_id, description, deadline, priority),
+            "INSERT INTO tasks (employee_id, description, deadline, priority, category, comment)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (employee_id, description, deadline, priority, category, comment),
         )
         await conn.commit()
         return {
             "id": cur.lastrowid, "employee_id": employee_id,
             "description": description, "deadline": deadline,
-            "priority": priority, "status": "new",
+            "priority": priority, "category": category,
+            "comment": comment, "status": "new",
         }
 
 

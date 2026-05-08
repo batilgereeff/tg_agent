@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import json
 import logging
+from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -16,23 +21,23 @@ from aiogram.enums import ChatAction
 
 import config
 import database as db
-import state
+import state as _st
 from agent import run_agent
 from tools import execute_tool, fmt_deadline
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Per-user conversation history
 _histories: dict[int, list[dict]] = {}
 _MAX_HISTORY = 20
+
 
 # ── Persistent reply keyboards ─────────────────────────────────────────────────
 
 _ADMIN_KB = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Новая задача"),      KeyboardButton(text="Статистика")],
-        [KeyboardButton(text="Список сотрудников"), KeyboardButton(text="Мои задачи")],
+        [KeyboardButton(text="Новая задача"),       KeyboardButton(text="Статистика")],
+        [KeyboardButton(text="Список сотрудников"),  KeyboardButton(text="Мои задачи")],
     ],
     resize_keyboard=True,
 )
@@ -44,7 +49,175 @@ _EMPLOYEE_KB = ReplyKeyboardMarkup(
 
 _REMOVE_KB = ReplyKeyboardRemove()
 
-# ── Inline keyboard builders ───────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FSM — Task Creation Wizard
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TaskWizard(StatesGroup):
+    choose_employee      = State()
+    enter_description    = State()
+    choose_deadline      = State()
+    enter_deadline_manual = State()
+    choose_priority      = State()
+    choose_category      = State()
+    enter_comment        = State()
+    confirm              = State()
+    edit_field           = State()
+
+
+PRIORITY_DISPLAY = {
+    "low":      "Низкий",
+    "normal":   "Обычный",
+    "high":     "Высокий",
+    "critical": "Срочный",
+}
+
+CATEGORY_DISPLAY = {
+    "repair":   "Ремонт",
+    "docs":     "Документы",
+    "purchase": "Закупка",
+    "call":     "Звонок",
+    "other":    "Другое",
+}
+
+
+# ── Deadline helpers ───────────────────────────────────────────────────────────
+
+def _deadline_from_preset(preset: str) -> tuple[str | None, str]:
+    now = datetime.now()
+    if preset == "1h":
+        dt = now + timedelta(hours=1)
+    elif preset == "3h":
+        dt = now + timedelta(hours=3)
+    elif preset == "today18":
+        dt = now.replace(hour=18, minute=0, second=0, microsecond=0)
+    elif preset == "tom12":
+        dt = (now + timedelta(days=1)).replace(hour=12, minute=0, second=0, microsecond=0)
+    elif preset == "tom18":
+        dt = (now + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+    else:
+        return None, "без дедлайна"
+    return dt.isoformat(), dt.strftime("%d.%m.%Y %H:%M")
+
+
+def _parse_manual_deadline(text: str) -> tuple[str | None, str | None]:
+    try:
+        dt = datetime.strptime(text.strip(), "%d.%m.%Y %H:%M")
+        return dt.isoformat(), None
+    except ValueError:
+        return None, "Неверный формат. Попробуйте ещё раз: 15.05.2026 18:00"
+
+
+# ── Wizard keyboards ───────────────────────────────────────────────────────────
+
+_CANCEL_ROW = [InlineKeyboardButton(text="❌ Отмена", callback_data="tw:cancel")]
+
+
+def _wiz_employee_kb(employees: list) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=e["name"], callback_data=f"tw:emp:{e['id']}")]
+        for e in employees
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows + [_CANCEL_ROW])
+
+
+def _wiz_cancel_only_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[_CANCEL_ROW])
+
+
+def _wiz_deadline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Через 1 час",    callback_data="tw:dl:1h"),
+            InlineKeyboardButton(text="Через 3 часа",   callback_data="tw:dl:3h"),
+        ],
+        [
+            InlineKeyboardButton(text="Сегодня 18:00",  callback_data="tw:dl:today18"),
+            InlineKeyboardButton(text="Завтра 12:00",   callback_data="tw:dl:tom12"),
+        ],
+        [
+            InlineKeyboardButton(text="Завтра 18:00",   callback_data="tw:dl:tom18"),
+            InlineKeyboardButton(text="Ввести вручную", callback_data="tw:dl:manual"),
+        ],
+        _CANCEL_ROW,
+    ])
+
+
+def _wiz_priority_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Низкий",  callback_data="tw:pr:low"),
+            InlineKeyboardButton(text="Обычный", callback_data="tw:pr:normal"),
+        ],
+        [
+            InlineKeyboardButton(text="Высокий", callback_data="tw:pr:high"),
+            InlineKeyboardButton(text="Срочный", callback_data="tw:pr:critical"),
+        ],
+        _CANCEL_ROW,
+    ])
+
+
+def _wiz_category_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Ремонт",    callback_data="tw:cat:repair"),
+            InlineKeyboardButton(text="Документы", callback_data="tw:cat:docs"),
+            InlineKeyboardButton(text="Закупка",   callback_data="tw:cat:purchase"),
+        ],
+        [
+            InlineKeyboardButton(text="Звонок",    callback_data="tw:cat:call"),
+            InlineKeyboardButton(text="Другое",    callback_data="tw:cat:other"),
+        ],
+        _CANCEL_ROW,
+    ])
+
+
+def _wiz_comment_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Пропустить", callback_data="tw:skip_comment")],
+        _CANCEL_ROW,
+    ])
+
+
+def _wiz_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Подтвердить ✓", callback_data="tw:confirm"),
+        InlineKeyboardButton(text="Изменить ✎",    callback_data="tw:edit"),
+        InlineKeyboardButton(text="Отмена ✗",      callback_data="tw:cancel"),
+    ]])
+
+
+def _wiz_edit_field_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сотрудник",   callback_data="tw:ef:employee")],
+        [InlineKeyboardButton(text="Задача",       callback_data="tw:ef:description")],
+        [InlineKeyboardButton(text="Дедлайн",     callback_data="tw:ef:deadline")],
+        [InlineKeyboardButton(text="Приоритет",   callback_data="tw:ef:priority")],
+        [InlineKeyboardButton(text="Категория",   callback_data="tw:ef:category")],
+        [InlineKeyboardButton(text="Комментарий", callback_data="tw:ef:comment")],
+        _CANCEL_ROW,
+    ])
+
+
+def _format_task_card(data: dict) -> str:
+    deadline_str = data.get("deadline_display") or "без дедлайна"
+    priority_str = PRIORITY_DISPLAY.get(data.get("priority", "normal"), "Обычный")
+    category_str = CATEGORY_DISPLAY.get(data.get("category", ""), "—")
+    comment_str  = data.get("comment") or "—"
+    return (
+        "Проверьте задачу:\n\n"
+        f"Сотрудник: {data.get('employee_name', '—')}\n"
+        f"Задача: {data.get('description', '—')}\n"
+        f"Дедлайн: {deadline_str}\n"
+        f"Приоритет: {priority_str}\n"
+        f"Категория: {category_str}\n"
+        f"Комментарий: {comment_str}\n\n"
+        "Всё верно?"
+    )
+
+
+# ── Agent-flow legacy keyboards ────────────────────────────────────────────────
 
 def _confirm_kb(admin_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
@@ -56,12 +229,12 @@ def _confirm_kb(admin_id: int) -> InlineKeyboardMarkup:
 
 def _review_kb(task_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Подтвердить ✓",    callback_data=f"tr:ok:{task_id}"),
-        InlineKeyboardButton(text="Вернуть в работу ↩", callback_data=f"tr:reject:{task_id}"),
+        InlineKeyboardButton(text="Подтвердить ✓",       callback_data=f"tr:ok:{task_id}"),
+        InlineKeyboardButton(text="Вернуть в работу ↩",  callback_data=f"tr:reject:{task_id}"),
     ]])
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Misc helpers ───────────────────────────────────────────────────────────────
 
 def _get_history(uid: int) -> list:
     return _histories.get(uid, [])
@@ -77,11 +250,10 @@ def _role_kb(is_admin: bool) -> ReplyKeyboardMarkup:
     return _ADMIN_KB if is_admin else _EMPLOYEE_KB
 
 
-# ── Task creation helpers ──────────────────────────────────────────────────────
+# ── Task creation: agent flow ──────────────────────────────────────────────────
 
 async def _do_create_task(uid: int, pending: dict, bot: Bot) -> str:
-    """Create confirmed task in DB, notify employee, return result text."""
-    state.clear_pending(uid)
+    _st.clear_pending(uid)
     task = await db.create_task(
         employee_id=pending["employee_id"],
         description=pending["description"],
@@ -111,7 +283,44 @@ async def _do_create_task(uid: int, pending: dict, bot: Bot) -> str:
     )
 
 
-# ── /start ─────────────────────────────────────────────────────────────────────
+# ── Task creation: FSM wizard flow ─────────────────────────────────────────────
+
+async def _do_create_task_fsm(data: dict, bot: Bot) -> str:
+    task = await db.create_task(
+        employee_id=data["employee_id"],
+        description=data["description"],
+        deadline=data.get("deadline"),
+        priority=data.get("priority", "normal"),
+        category=data.get("category"),
+        comment=data.get("comment"),
+    )
+    notified = False
+    emp_tid = data.get("employee_telegram_id")
+    if emp_tid:
+        dl = fmt_deadline(data.get("deadline"))
+        cat = CATEGORY_DISPLAY.get(data.get("category", ""), "")
+        lines = [f"Вам назначена задача #{task['id']}\n", data["description"]]
+        if dl:                  lines.append(f"Дедлайн: {dl}")
+        if cat:                 lines.append(f"Категория: {cat}")
+        if data.get("comment"): lines.append(f"Комментарий: {data['comment']}")
+        try:
+            await bot.send_message(emp_tid, "\n".join(lines))
+            notified = True
+        except Exception as e:
+            logger.warning("Notify employee failed: %s", e)
+
+    return (
+        f"Задача #{task['id']} создана.\n\n"
+        f"Сотрудник: {data['employee_name']}\n"
+        f"Задача: {data['description']}\n"
+        + ("Уведомление отправлено сотруднику." if notified
+           else "Сотрудник ещё не зарегистрирован, уведомление не отправлено.")
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Command handlers
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
@@ -146,10 +355,7 @@ async def cmd_start(message: Message) -> None:
 
     employee = await db.get_employee_by_telegram_id(user.id)
     if employee:
-        await message.answer(
-            f"С возвращением, {employee['name']}.",
-            reply_markup=_EMPLOYEE_KB,
-        )
+        await message.answer(f"С возвращением, {employee['name']}.", reply_markup=_EMPLOYEE_KB)
     else:
         await message.answer(
             f"Ваш Telegram ID: {user.id}\n\n"
@@ -158,12 +364,9 @@ async def cmd_start(message: Message) -> None:
         )
 
 
-# ── /help ──────────────────────────────────────────────────────────────────────
-
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    is_admin = message.from_user.id == config.ADMIN_ID
-    await _send_help(message, is_admin)
+    await _send_help(message, message.from_user.id == config.ADMIN_ID)
 
 
 async def _send_help(message: Message, is_admin: bool) -> None:
@@ -173,6 +376,7 @@ async def _send_help(message: Message, is_admin: bool) -> None:
             "- Добавь сотрудника Иванов — регистрация\n"
             "- Список сотрудников — все зарегистрированные\n\n"
             "Задачи:\n"
+            "- Новая задача — пошаговый мастер создания\n"
             "- Поставь Иванову задачу: описание, дедлайн завтра 18:00\n"
             "- Задачи Иванова — задачи конкретного сотрудника\n"
             "- Напомни Иванову про задачу #3\n"
@@ -194,26 +398,260 @@ async def _send_help(message: Message, is_admin: bool) -> None:
         )
 
 
-# ── /clear ─────────────────────────────────────────────────────────────────────
-
 @router.message(Command("clear"))
-async def cmd_clear(message: Message) -> None:
+async def cmd_clear(message: Message, fsm: FSMContext) -> None:
     uid = message.from_user.id
     _histories.pop(uid, None)
-    state.clear_pending(uid)
-    state.end_new_task_mode(uid)
-    is_admin = uid == config.ADMIN_ID
-    await message.answer("История диалога очищена.", reply_markup=_role_kb(is_admin))
+    _st.clear_pending(uid)
+    _st.end_new_task_mode(uid)
+    await fsm.clear()
+    await message.answer("История диалога очищена.", reply_markup=_role_kb(uid == config.ADMIN_ID))
 
-
-# ── /id ────────────────────────────────────────────────────────────────────────
 
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
 
 
-# ── Callback: task confirmation (inline buttons on card) ───────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# FSM Wizard handlers  (registered BEFORE the catch-all handle_message)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Start: "Новая задача" button ───────────────────────────────────────────────
+
+@router.message(F.text == "Новая задача", F.from_user.id == config.ADMIN_ID, StateFilter(None))
+async def wiz_start(message: Message, fsm: FSMContext) -> None:
+    employees = await db.list_employees()
+    if not employees:
+        await message.answer(
+            "Нет сотрудников. Сначала добавьте командой:\nДобавь сотрудника Иванов",
+            reply_markup=_ADMIN_KB,
+        )
+        return
+    await fsm.set_state(TaskWizard.choose_employee)
+    await message.answer("Шаг 1/6 — Кому назначить?", reply_markup=_wiz_employee_kb(employees))
+
+
+# ── Universal cancel (inline button) ──────────────────────────────────────────
+
+@router.callback_query(F.data == "tw:cancel")
+async def wiz_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
+    await fsm.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
+    await callback.answer()
+
+
+# ── Step 1 → 2: employee selected ─────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tw:emp:"), StateFilter(TaskWizard.choose_employee))
+async def wiz_cb_employee(callback: CallbackQuery, fsm: FSMContext) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    await fsm.update_data(
+        employee_id=emp["id"],
+        employee_name=emp["name"],
+        employee_telegram_id=emp.get("telegram_id"),
+    )
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.enter_description)
+        await callback.message.answer(
+            f"Сотрудник: {emp['name']}\n\nШаг 2/6 — Опишите задачу текстом:",
+            reply_markup=_wiz_cancel_only_kb(),
+        )
+    await callback.answer()
+
+
+# ── Step 2: description text ───────────────────────────────────────────────────
+
+@router.message(TaskWizard.enter_description)
+async def wiz_description(message: Message, fsm: FSMContext) -> None:
+    text = (message.text or "").strip()
+    await fsm.update_data(description=text)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.choose_deadline)
+        await message.answer(f"Задача: {text}\n\nШаг 3/6 — Дедлайн:", reply_markup=_wiz_deadline_kb())
+
+
+# ── Step 3: deadline preset ────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tw:dl:"), StateFilter(TaskWizard.choose_deadline))
+async def wiz_cb_deadline(callback: CallbackQuery, fsm: FSMContext) -> None:
+    preset = callback.data.split(":")[-1]
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if preset == "manual":
+        await fsm.set_state(TaskWizard.enter_deadline_manual)
+        await callback.message.answer(
+            "Введите дедлайн в формате: 15.05.2026 18:00",
+            reply_markup=_wiz_cancel_only_kb(),
+        )
+        await callback.answer()
+        return
+
+    iso, display = _deadline_from_preset(preset)
+    await fsm.update_data(deadline=iso, deadline_display=display)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.choose_priority)
+        await callback.message.answer(
+            f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет:", reply_markup=_wiz_priority_kb()
+        )
+    await callback.answer()
+
+
+# ── Step 3b: manual deadline input ────────────────────────────────────────────
+
+@router.message(TaskWizard.enter_deadline_manual)
+async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
+    iso, err = _parse_manual_deadline(message.text or "")
+    if err:
+        await message.answer(err, reply_markup=_wiz_cancel_only_kb())
+        return
+    display = datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
+    await fsm.update_data(deadline=iso, deadline_display=display)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.choose_priority)
+        await message.answer(f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет:", reply_markup=_wiz_priority_kb())
+
+
+# ── Step 4: priority ───────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tw:pr:"), StateFilter(TaskWizard.choose_priority))
+async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
+    priority = callback.data.split(":")[-1]
+    await fsm.update_data(priority=priority)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.choose_category)
+        await callback.message.answer(
+            f"Приоритет: {PRIORITY_DISPLAY.get(priority, priority)}\n\nШаг 5/6 — Категория:",
+            reply_markup=_wiz_category_kb(),
+        )
+    await callback.answer()
+
+
+# ── Step 5: category ───────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tw:cat:"), StateFilter(TaskWizard.choose_category))
+async def wiz_cb_category(callback: CallbackQuery, fsm: FSMContext) -> None:
+    category = callback.data.split(":")[-1]
+    await fsm.update_data(category=category)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    else:
+        await fsm.set_state(TaskWizard.enter_comment)
+        await callback.message.answer(
+            f"Категория: {CATEGORY_DISPLAY.get(category, category)}\n\n"
+            "Шаг 6/6 — Комментарий?\nВведите текст или нажмите Пропустить:",
+            reply_markup=_wiz_comment_kb(),
+        )
+    await callback.answer()
+
+
+# ── Step 6: comment text ───────────────────────────────────────────────────────
+
+@router.message(TaskWizard.enter_comment)
+async def wiz_comment(message: Message, fsm: FSMContext) -> None:
+    await fsm.update_data(comment=(message.text or "").strip() or None)
+    await fsm.set_state(TaskWizard.confirm)
+    await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+
+
+@router.callback_query(F.data == "tw:skip_comment", StateFilter(TaskWizard.enter_comment))
+async def wiz_cb_skip_comment(callback: CallbackQuery, fsm: FSMContext) -> None:
+    await fsm.update_data(comment=None)
+    await fsm.set_state(TaskWizard.confirm)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await callback.answer()
+
+
+# ── Step 7: confirm / edit / cancel ───────────────────────────────────────────
+
+@router.callback_query(F.data == "tw:confirm", StateFilter(TaskWizard.confirm))
+async def wiz_cb_confirm(callback: CallbackQuery, fsm: FSMContext, bot: Bot) -> None:
+    data = await fsm.get_data()
+    await fsm.clear()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    reply = await _do_create_task_fsm(data, bot)
+    await callback.message.answer(reply, reply_markup=_ADMIN_KB)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tw:edit", StateFilter(TaskWizard.confirm))
+async def wiz_cb_edit(callback: CallbackQuery, fsm: FSMContext) -> None:
+    await fsm.set_state(TaskWizard.edit_field)
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Что изменить?", reply_markup=_wiz_edit_field_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tw:ef:"), StateFilter(TaskWizard.edit_field))
+async def wiz_cb_edit_field(callback: CallbackQuery, fsm: FSMContext) -> None:
+    field = callback.data.split(":")[-1]
+    await fsm.update_data(editing=True)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if field == "employee":
+        employees = await db.list_employees()
+        await fsm.set_state(TaskWizard.choose_employee)
+        await callback.message.answer("Кому назначить?", reply_markup=_wiz_employee_kb(employees))
+    elif field == "description":
+        await fsm.set_state(TaskWizard.enter_description)
+        await callback.message.answer("Опишите задачу текстом:", reply_markup=_wiz_cancel_only_kb())
+    elif field == "deadline":
+        await fsm.set_state(TaskWizard.choose_deadline)
+        await callback.message.answer("Выберите дедлайн:", reply_markup=_wiz_deadline_kb())
+    elif field == "priority":
+        await fsm.set_state(TaskWizard.choose_priority)
+        await callback.message.answer("Выберите приоритет:", reply_markup=_wiz_priority_kb())
+    elif field == "category":
+        await fsm.set_state(TaskWizard.choose_category)
+        await callback.message.answer("Выберите категорию:", reply_markup=_wiz_category_kb())
+    elif field == "comment":
+        await fsm.set_state(TaskWizard.enter_comment)
+        await callback.message.answer(
+            "Введите комментарий или нажмите Пропустить:",
+            reply_markup=_wiz_comment_kb(),
+        )
+    await callback.answer()
+
+
+# ── Catch-all for unexpected text during wizard (shows hint) ──────────────────
+
+@router.message(StateFilter(TaskWizard))
+async def wiz_unexpected(message: Message, fsm: FSMContext) -> None:
+    if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
+        await fsm.clear()
+        await message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
+    else:
+        await message.answer("Используйте кнопки для навигации или нажмите ❌ Отмена.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Agent-flow callbacks
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.callback_query(F.data.startswith("tc:"))
 async def cb_task_confirm(callback: CallbackQuery, bot: Bot) -> None:
@@ -224,7 +662,7 @@ async def cb_task_confirm(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Это не ваш запрос.", show_alert=True)
         return
 
-    pending = state.get_pending(admin_id)
+    pending = _st.get_pending(admin_id)
 
     if action == "yes":
         if not pending:
@@ -235,17 +673,14 @@ async def cb_task_confirm(callback: CallbackQuery, bot: Bot) -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(reply, reply_markup=_ADMIN_KB)
         _save_history(admin_id, "Да", reply)
-
     elif action == "edit":
-        state.clear_pending(admin_id)
+        _st.clear_pending(admin_id)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
-            "Что хотите изменить? Напишите и я пересоздам карточку.",
-            reply_markup=_ADMIN_KB,
+            "Что хотите изменить? Напишите и я пересоздам карточку.", reply_markup=_ADMIN_KB
         )
-
     elif action == "cancel":
-        state.clear_pending(admin_id)
+        _st.clear_pending(admin_id)
         await callback.message.edit_reply_markup(reply_markup=None)
         reply = "Создание задачи отменено."
         await callback.message.answer(reply, reply_markup=_ADMIN_KB)
@@ -253,8 +688,6 @@ async def cb_task_confirm(callback: CallbackQuery, bot: Bot) -> None:
 
     await callback.answer()
 
-
-# ── Callback: task review (inline buttons on admin notification) ───────────────
 
 @router.callback_query(F.data.startswith("tr:"))
 async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
@@ -275,10 +708,8 @@ async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
     await callback.message.edit_reply_markup(reply_markup=None)
 
     if data.get("ok"):
-        if action == "ok":
-            reply = f"Задача #{task_id} подтверждена и закрыта."
-        else:
-            reply = f"Задача #{task_id} возвращена в работу."
+        reply = (f"Задача #{task_id} подтверждена и закрыта."
+                 if action == "ok" else f"Задача #{task_id} возвращена в работу.")
     else:
         reply = data.get("error", "Ошибка при обработке.")
 
@@ -286,7 +717,9 @@ async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
 
-# ── Main message handler ───────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Main message handler (non-FSM, passes to Claude)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.message()
 async def handle_message(message: Message, bot: Bot) -> None:
@@ -298,7 +731,6 @@ async def handle_message(message: Message, bot: Bot) -> None:
     is_admin = uid == config.ADMIN_ID
     text = message.text.strip()
 
-    # ── Role check ─────────────────────────────────────────────────────────────
     if not is_admin:
         emp = await db.get_employee_by_telegram_id(uid)
         if not emp:
@@ -307,32 +739,20 @@ async def handle_message(message: Message, bot: Bot) -> None:
             )
             return
         employee_name = emp["name"]
-
-        # Employee button: "Помощь"
         if text == "Помощь":
             await _send_help(message, is_admin=False)
             return
     else:
         employee_name = "Администратор"
 
-    # ── Admin-only button: "Новая задача" ──────────────────────────────────────
-    if is_admin and text == "Новая задача":
-        state.start_new_task_mode(uid)
-        await message.answer(
-            "Кому назначить? Напиши имя сотрудника.",
-            reply_markup=_ADMIN_KB,
-        )
-        return
-
-    # ── Admin new-task wizard: receive employee name ───────────────────────────
-    if is_admin and state.in_new_task_mode(uid):
-        state.end_new_task_mode(uid)
-        # Reframe as natural language for Claude so it can ask description/deadline
+    # Legacy agent-based wizard (for backward compat)
+    if is_admin and _st.in_new_task_mode(uid):
+        _st.end_new_task_mode(uid)
         text = f"Создай задачу для сотрудника {text!r}. Спроси у меня описание и дедлайн, потом покажи карточку."
 
-    # ── Intercept pending confirmation (text fallback for Да/Нет/Изменить) ─────
+    # Intercept pending confirmation (text fallback)
     if is_admin:
-        pending = state.get_pending(uid)
+        pending = _st.get_pending(uid)
         if pending:
             token = text.lower()
             if token in {"да", "yes", "ок", "ok", "верно", "подтвердить"}:
@@ -341,16 +761,14 @@ async def handle_message(message: Message, bot: Bot) -> None:
                 await message.answer(reply, reply_markup=_ADMIN_KB)
                 return
             if token in {"нет", "no", "отмена", "отменить", "cancel"}:
-                state.clear_pending(uid)
+                _st.clear_pending(uid)
                 reply = "Создание задачи отменено."
                 _save_history(uid, "Нет", reply)
                 await message.answer(reply, reply_markup=_ADMIN_KB)
                 return
             if token in {"изменить", "edit", "поправить"}:
-                state.clear_pending(uid)
-                # fall through to Claude
+                _st.clear_pending(uid)
 
-    # ── Claude ─────────────────────────────────────────────────────────────────
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 
     history = _get_history(uid)
@@ -370,12 +788,8 @@ async def handle_message(message: Message, bot: Bot) -> None:
 
     _save_history(uid, message.text.strip(), response)
 
-    # If propose_task was called → show inline confirm keyboard
-    has_pending = is_admin and state.get_pending(uid) is not None
+    has_pending = is_admin and _st.get_pending(uid) is not None
     reply_kb = _confirm_kb(uid) if has_pending else _role_kb(is_admin)
 
     for i, start in enumerate(range(0, len(response), 4096)):
-        await message.answer(
-            response[start:start + 4096],
-            reply_markup=reply_kb if i == 0 else None,
-        )
+        await message.answer(response[start:start + 4096], reply_markup=reply_kb if i == 0 else None)

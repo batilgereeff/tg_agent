@@ -4,6 +4,7 @@ import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -34,6 +35,7 @@ async def main() -> None:
     bot = Bot(token=config.TELEGRAM_TOKEN, default=DefaultBotProperties())
 
     scheduler = AsyncIOScheduler()
+
     scheduler.add_job(check_deadlines, "interval", minutes=5, args=[bot],
                       id="deadline_check", max_instances=1)
     scheduler.add_job(morning_digest, CronTrigger(hour=9, minute=0), args=[bot],
@@ -43,7 +45,7 @@ async def main() -> None:
     scheduler.start()
     logger.info("Scheduler: deadline check 5 мин | утром 09:00 | вечером 18:00")
 
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
     me = await bot.get_me()
