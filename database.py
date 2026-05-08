@@ -243,9 +243,63 @@ async def get_tasks_for_deadline_check() -> list:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute(f"""
             {_TASK_SELECT}
-            WHERE t.status NOT IN ('done') AND t.deadline IS NOT NULL
+            WHERE t.status NOT IN ('done', 'cancelled') AND t.deadline IS NOT NULL
         """)
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_employee_stats(employee_id: int) -> dict:
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        cur = await conn.execute("""
+            SELECT
+                SUM(CASE WHEN status NOT IN ('done', 'cancelled') THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN status = 'done'                     THEN 1 ELSE 0 END) AS done_count
+            FROM tasks WHERE employee_id = ?
+        """, (employee_id,))
+        row = await cur.fetchone()
+        return {"active": row[0] or 0, "done": row[1] or 0}
+
+
+async def rename_employee(employee_id: int, new_name: str) -> Optional[dict]:
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        await conn.execute("UPDATE employees SET name = ? WHERE id = ?", (new_name, employee_id))
+        await conn.commit()
+    return await get_employee_by_id(employee_id)
+
+
+async def delete_employee(employee_id: int) -> int:
+    """Cancel active tasks then delete employee. Returns number of cancelled tasks."""
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        cur = await conn.execute(
+            "UPDATE tasks SET status = 'cancelled'"
+            " WHERE employee_id = ? AND status NOT IN ('done', 'cancelled')",
+            (employee_id,),
+        )
+        cancelled = cur.rowcount
+        await conn.execute("DELETE FROM employees WHERE id = ?", (employee_id,))
+        await conn.commit()
+    return cancelled
+
+
+async def reset_employee_code(employee_id: int) -> Optional[dict]:
+    """Generate a new reg code and unlink the Telegram account."""
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        new_code = _gen_code()
+        while True:
+            cur = await conn.execute(
+                "SELECT id FROM employees WHERE reg_code = ? AND id != ?",
+                (new_code, employee_id),
+            )
+            if not await cur.fetchone():
+                break
+            new_code = _gen_code()
+        await conn.execute(
+            "UPDATE employees SET reg_code = ?, telegram_id = NULL, registered_at = NULL"
+            " WHERE id = ?",
+            (new_code, employee_id),
+        )
+        await conn.commit()
+    return await get_employee_by_id(employee_id)
 
 
 async def mark_deadline_reminded(task_id: int) -> None:

@@ -12,11 +12,12 @@ logger = logging.getLogger(__name__)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 STATUS_RU = {
-    "new": "новая",
+    "new":         "новая",
     "in_progress": "в работе",
-    "review": "на проверке",
-    "done": "выполнена",
-    "overdue": "просрочена",
+    "review":      "на проверке",
+    "done":        "выполнена",
+    "overdue":     "просрочена",
+    "cancelled":   "отменена",
 }
 
 PRIORITY_RU = {
@@ -159,6 +160,29 @@ ADMIN_TOOL_SCHEMAS = [
                 "comment": {"type": "string", "description": "Причина отклонения"},
             },
             "required": ["task_id"],
+        },
+    },
+    {
+        "name": "rename_employee",
+        "description": "Переименовать сотрудника. Имя обновляется во всех связанных задачах.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "employee_name": {"type": "string", "description": "Текущее имя сотрудника"},
+                "new_name":      {"type": "string", "description": "Новое имя"},
+            },
+            "required": ["employee_name", "new_name"],
+        },
+    },
+    {
+        "name": "delete_employee",
+        "description": "Удалить сотрудника. Все активные задачи будут отменены.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "employee_name": {"type": "string", "description": "Имя сотрудника"},
+            },
+            "required": ["employee_name"],
         },
     },
 ]
@@ -392,6 +416,31 @@ async def execute_tool(name: str, input_data: dict, caller_id: int = 0, bot=None
                 except Exception as e:
                     logger.warning("Notify admin failed: %s", e)
             return json.dumps({"ok": True, "task_id": task["id"], "status": "review"}, ensure_ascii=False)
+
+        elif name == "rename_employee":
+            matches = await db.find_employees_by_name(input_data["employee_name"])
+            if not matches:
+                return json.dumps({"error": f"Сотрудник '{input_data['employee_name']}' не найден"})
+            if len(matches) > 1:
+                return json.dumps({"error": f"Найдено несколько: {[e['name'] for e in matches]}. Уточните имя."})
+            emp = matches[0]
+            old_name = emp["name"]
+            updated = await db.rename_employee(emp["id"], input_data["new_name"])
+            return json.dumps({"ok": True, "old_name": old_name, "new_name": updated["name"]},
+                              ensure_ascii=False)
+
+        elif name == "delete_employee":
+            matches = await db.find_employees_by_name(input_data["employee_name"])
+            if not matches:
+                return json.dumps({"error": f"Сотрудник '{input_data['employee_name']}' не найден"})
+            if len(matches) > 1:
+                return json.dumps({"error": f"Найдено несколько: {[e['name'] for e in matches]}. Уточните имя."})
+            emp = matches[0]
+            cancelled = await db.delete_employee(emp["id"])
+            return json.dumps(
+                {"ok": True, "deleted": emp["name"], "cancelled_tasks": cancelled},
+                ensure_ascii=False,
+            )
 
         else:
             return json.dumps({"error": f"Неизвестный инструмент: {name}"})

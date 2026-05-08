@@ -7,7 +7,13 @@
       "Read(//tmp/**)",
       "Bash(jobs -l)",
       "Bash(tee /tmp/bot.log)",
-      "Bash(pkill -f \"python3 main.py\")"
+      "Bash(pkill -f \"python3 main.py\")",
+      "Bash(pkill -9 -f python3)",
+      "Bash(python -m py_compile bot.py database.py main.py)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(echo \"exit: $?\")"
     ]
   }
 }

@@ -571,6 +571,111 @@ class TestDatabase(unittest.TestCase):
         self.assertIn("С дедлайном", descs)
         self.assertNotIn("Без дедлайна", descs)
 
+    def test_get_tasks_for_deadline_check_excludes_cancelled(self):
+        import database as db
+        emp = run(db.create_employee("Отменённый"))
+        task = run(db.create_task(employee_id=emp["id"], description="Отменённая",
+                                  deadline="2030-01-01T09:00:00"))
+        run(db.update_task_status(task["id"], "cancelled"))
+        tasks = run(db.get_tasks_for_deadline_check())
+        descs = {t["description"] for t in tasks}
+        self.assertNotIn("Отменённая", descs)
+
+    def test_get_employee_stats_empty(self):
+        import database as db
+        emp = run(db.create_employee("Без задач"))
+        stats = run(db.get_employee_stats(emp["id"]))
+        self.assertEqual(stats["active"], 0)
+        self.assertEqual(stats["done"], 0)
+
+    def test_get_employee_stats_counts(self):
+        import database as db
+        emp = run(db.create_employee("Со задачами"))
+        t1 = run(db.create_task(employee_id=emp["id"], description="Активная 1"))
+        t2 = run(db.create_task(employee_id=emp["id"], description="Активная 2"))
+        t3 = run(db.create_task(employee_id=emp["id"], description="Выполненная"))
+        run(db.update_task_status(t3["id"], "done"))
+        stats = run(db.get_employee_stats(emp["id"]))
+        self.assertEqual(stats["active"], 2)
+        self.assertEqual(stats["done"], 1)
+
+    def test_rename_employee(self):
+        import database as db
+        emp = run(db.create_employee("Старое имя"))
+        updated = run(db.rename_employee(emp["id"], "Новое имя"))
+        self.assertEqual(updated["name"], "Новое имя")
+        # Verify persisted
+        fetched = run(db.get_employee_by_id(emp["id"]))
+        self.assertEqual(fetched["name"], "Новое имя")
+
+    def test_rename_reflects_in_tasks(self):
+        import database as db
+        emp = run(db.create_employee("Исходный"))
+        task = run(db.create_task(employee_id=emp["id"], description="Задача"))
+        run(db.rename_employee(emp["id"], "Переименованный"))
+        fetched_task = run(db.get_task(task["id"]))
+        self.assertEqual(fetched_task["employee_name"], "Переименованный")
+
+    def test_delete_employee_removes_record(self):
+        import database as db
+        emp = run(db.create_employee("Удалить меня"))
+        run(db.delete_employee(emp["id"]))
+        self.assertIsNone(run(db.get_employee_by_id(emp["id"])))
+
+    def test_delete_employee_cancels_active_tasks(self):
+        import database as db
+        import aiosqlite
+
+        emp = run(db.create_employee("С задачами"))
+        t1 = run(db.create_task(employee_id=emp["id"], description="Новая"))
+        t2 = run(db.create_task(employee_id=emp["id"], description="В работе"))
+        t3 = run(db.create_task(employee_id=emp["id"], description="Готова"))
+        run(db.update_task_status(t2["id"], "in_progress"))
+        run(db.update_task_status(t3["id"], "done"))
+
+        cancelled_count = run(db.delete_employee(emp["id"]))
+        self.assertEqual(cancelled_count, 2)  # t1 and t2 are active
+
+        async def statuses():
+            async with aiosqlite.connect(self._db_path) as conn:
+                conn.row_factory = aiosqlite.Row
+                cur = await conn.execute("SELECT id, status FROM tasks WHERE id IN (?,?,?)",
+                                         (t1["id"], t2["id"], t3["id"]))
+                return {row["id"]: row["status"] for row in await cur.fetchall()}
+
+        st = run(statuses())
+        self.assertEqual(st[t1["id"]], "cancelled")
+        self.assertEqual(st[t2["id"]], "cancelled")
+        self.assertEqual(st[t3["id"]], "done")  # done stays done
+
+    def test_delete_employee_returns_cancelled_count(self):
+        import database as db
+        emp = run(db.create_employee("Считаем"))
+        run(db.create_task(employee_id=emp["id"], description="T1"))
+        run(db.create_task(employee_id=emp["id"], description="T2"))
+        count = run(db.delete_employee(emp["id"]))
+        self.assertEqual(count, 2)
+
+    def test_reset_employee_code_generates_new_code(self):
+        import database as db
+        emp = run(db.create_employee("Сброс кода"))
+        old_code = emp["reg_code"]
+        updated = run(db.reset_employee_code(emp["id"]))
+        self.assertNotEqual(updated["reg_code"], old_code)
+        self.assertTrue(updated["reg_code"].isdigit())
+        self.assertEqual(len(updated["reg_code"]), 6)
+
+    def test_reset_employee_code_clears_telegram(self):
+        import database as db
+        emp = run(db.create_employee("Потерял Telegram"))
+        run(db.register_employee(emp["reg_code"], telegram_id=123))
+        linked = run(db.get_employee_by_id(emp["id"]))
+        self.assertIsNotNone(linked["telegram_id"])
+
+        run(db.reset_employee_code(emp["id"]))
+        reset = run(db.get_employee_by_id(emp["id"]))
+        self.assertIsNone(reset["telegram_id"])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # tools.py — execute_tool (with real temp DB)
@@ -700,6 +805,111 @@ class TestExecuteTool(unittest.TestCase):
         task = run(db.create_task(employee_id=emp["id"], description="Чужая"))
         d = self._json("start_task", {"task_id": task["id"]}, caller=9999)
         self.assertIn("error", d)
+
+    def test_rename_employee_tool(self):
+        self._json("add_employee", {"name": "Иванов"})
+        d = self._json("rename_employee", {"employee_name": "Иванов", "new_name": "Иванова"})
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["old_name"], "Иванов")
+        self.assertEqual(d["new_name"], "Иванова")
+
+    def test_rename_employee_not_found(self):
+        d = self._json("rename_employee", {"employee_name": "Никто", "new_name": "Кто-то"})
+        self.assertIn("error", d)
+
+    def test_rename_employee_ambiguous(self):
+        self._json("add_employee", {"name": "Иванов Иван"})
+        self._json("add_employee", {"name": "Иванов Пётр"})
+        d = self._json("rename_employee", {"employee_name": "Иванов", "new_name": "X"})
+        self.assertIn("error", d)
+
+    def test_delete_employee_tool(self):
+        self._json("add_employee", {"name": "УдалитьМеня"})
+        d = self._json("delete_employee", {"employee_name": "УдалитьМеня"})
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["deleted"], "УдалитьМеня")
+
+    def test_delete_employee_tool_not_found(self):
+        d = self._json("delete_employee", {"employee_name": "Призрак"})
+        self.assertIn("error", d)
+
+    def test_delete_employee_tool_cancels_tasks(self):
+        import database as db
+        self._json("add_employee", {"name": "СоЗадачами"})
+        emp = run(db.list_employees())[0]
+        run(db.create_task(employee_id=emp["id"], description="Активная"))
+        d = self._json("delete_employee", {"employee_name": "СоЗадачами"})
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["cancelled_tasks"], 1)
+
+    def test_status_ru_has_cancelled(self):
+        from tools import STATUS_RU
+        self.assertIn("cancelled", STATUS_RU)
+        self.assertEqual(STATUS_RU["cancelled"], "отменена")
+
+
+class TestEmployeeManagementKbs(unittest.TestCase):
+    """Test employee management keyboard builders."""
+
+    def _all_cb(self, kb):
+        return [btn.callback_data for row in kb.inline_keyboard for btn in row]
+
+    def test_emp_list_kb(self):
+        from bot import _emp_list_kb
+        employees = [{"id": 1, "name": "Иванов"}, {"id": 2, "name": "Петров"}]
+        cb = self._all_cb(_emp_list_kb(employees))
+        self.assertIn("em:card:1", cb)
+        self.assertIn("em:card:2", cb)
+
+    def test_emp_card_kb_all_actions(self):
+        from bot import _emp_card_kb
+        cb = self._all_cb(_emp_card_kb(7))
+        self.assertIn("em:tasks:7", cb)
+        self.assertIn("em:rename:7", cb)
+        self.assertIn("em:del:7", cb)
+        self.assertIn("em:newcode:7", cb)
+        self.assertIn("em:list", cb)
+
+    def test_emp_delete_kb(self):
+        from bot import _emp_delete_kb
+        cb = self._all_cb(_emp_delete_kb(3))
+        self.assertIn("em:delok:3", cb)
+        self.assertIn("em:card:3", cb)
+
+    def test_emp_cancel_kb(self):
+        from bot import _emp_cancel_kb
+        cb = self._all_cb(_emp_cancel_kb())
+        self.assertIn("em:cancel", cb)
+
+    def test_format_emp_card_connected(self):
+        from bot import _format_emp_card
+        emp = {"name": "Иванов", "telegram_id": 123, "created_at": "2026-05-08 10:00:00"}
+        stats = {"active": 3, "done": 7}
+        card = _format_emp_card(emp, stats)
+        self.assertIn("Иванов", card)
+        self.assertIn("подключён", card)
+        self.assertIn("08.05.2026", card)
+        self.assertIn("Активных задач: 3", card)
+        self.assertIn("Выполненных: 7", card)
+
+    def test_format_emp_card_not_connected(self):
+        from bot import _format_emp_card
+        emp = {"name": "Петров", "telegram_id": None, "created_at": "2026-01-01 00:00:00"}
+        stats = {"active": 0, "done": 0}
+        card = _format_emp_card(emp, stats)
+        self.assertIn("не подключён", card)
+
+    def test_format_emp_card_no_date(self):
+        from bot import _format_emp_card
+        emp = {"name": "Без даты", "telegram_id": None, "created_at": None}
+        stats = {"active": 0, "done": 0}
+        card = _format_emp_card(emp, stats)
+        self.assertIn("—", card)
+
+    def test_emp_wizard_state_defined(self):
+        from bot import EmpWizard
+        state_names = {s.state.split(":")[-1] for s in EmpWizard.__states__}
+        self.assertIn("rename", state_names)
 
 
 if __name__ == "__main__":

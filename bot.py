@@ -23,7 +23,7 @@ import config
 import database as db
 import state as _st
 from agent import run_agent
-from tools import execute_tool, fmt_deadline
+from tools import execute_tool, fmt_deadline, STATUS_RU
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -647,6 +647,280 @@ async def wiz_unexpected(message: Message, fsm: FSMContext) -> None:
         await message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
     else:
         await message.answer("Используйте кнопки для навигации или нажмите ❌ Отмена.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Employee Management
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EmpWizard(StatesGroup):
+    rename = State()
+
+
+# ── Keyboards ──────────────────────────────────────────────────────────────────
+
+def _emp_list_kb(employees: list) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=e["name"], callback_data=f"em:card:{e['id']}")]
+        for e in employees
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _emp_card_kb(emp_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Задачи",        callback_data=f"em:tasks:{emp_id}"),
+            InlineKeyboardButton(text="Переименовать", callback_data=f"em:rename:{emp_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="🗑 Удалить",    callback_data=f"em:del:{emp_id}"),
+            InlineKeyboardButton(text="🔑 Новый код",  callback_data=f"em:newcode:{emp_id}"),
+        ],
+        [InlineKeyboardButton(text="← Назад",          callback_data="em:list")],
+    ])
+
+
+def _emp_delete_kb(emp_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Да, удалить ✓", callback_data=f"em:delok:{emp_id}"),
+        InlineKeyboardButton(text="Нет ✗",         callback_data=f"em:card:{emp_id}"),
+    ]])
+
+
+def _emp_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="em:cancel")]
+    ])
+
+
+# ── Card formatter ─────────────────────────────────────────────────────────────
+
+def _format_emp_card(emp: dict, stats: dict) -> str:
+    tg_status = "подключён" if emp.get("telegram_id") else "не подключён"
+    date_str = "—"
+    ts = emp.get("created_at")
+    if ts:
+        try:
+            date_str = datetime.fromisoformat(str(ts)).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            date_str = str(ts)[:10]
+    return (
+        f"Сотрудник: {emp['name']}\n"
+        f"Зарегистрирован: {date_str}\n"
+        f"Telegram: {tg_status}\n"
+        f"Активных задач: {stats['active']}\n"
+        f"Выполненных: {stats['done']}"
+    )
+
+
+# ── "Список сотрудников" reply-keyboard button ─────────────────────────────────
+
+@router.message(F.text == "Список сотрудников", F.from_user.id == config.ADMIN_ID, StateFilter(None))
+async def handle_emp_list_btn(message: Message) -> None:
+    employees = await db.list_employees()
+    if not employees:
+        await message.answer(
+            "Нет сотрудников. Добавьте командой:\nДобавь сотрудника Иванов",
+            reply_markup=_ADMIN_KB,
+        )
+        return
+    await message.answer("Выберите сотрудника:", reply_markup=_emp_list_kb(employees))
+
+
+# ── em:list — back to list ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "em:list")
+async def em_cb_list(callback: CallbackQuery) -> None:
+    employees = await db.list_employees()
+    if employees:
+        await callback.message.edit_text("Выберите сотрудника:", reply_markup=_emp_list_kb(employees))
+    else:
+        await callback.message.edit_text("Нет сотрудников.")
+    await callback.answer()
+
+
+# ── em:card:{id} — employee card ──────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("em:card:"))
+async def em_cb_card(callback: CallbackQuery) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    stats = await db.get_employee_stats(emp_id)
+    await callback.message.edit_text(_format_emp_card(emp, stats), reply_markup=_emp_card_kb(emp_id))
+    await callback.answer()
+
+
+# ── em:tasks:{id} — employee tasks ────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("em:tasks:"))
+async def em_cb_tasks(callback: CallbackQuery) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    tasks = await db.list_tasks(employee_id=emp_id)
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← К сотруднику", callback_data=f"em:card:{emp_id}")]
+    ])
+    if not tasks:
+        text = f"У {emp['name']} нет задач."
+    else:
+        lines = [f"Задачи {emp['name']}:\n"]
+        for t in tasks:
+            dl = fmt_deadline(t.get("deadline")) or "без дедлайна"
+            status_label = STATUS_RU.get(t["status"], t["status"])
+            desc = t["description"][:50] + ("…" if len(t["description"]) > 50 else "")
+            lines.append(f"#{t['id']} | {status_label} | {desc} | {dl}")
+        text = "\n".join(lines)[:4000]
+    await callback.message.edit_text(text, reply_markup=back_kb)
+    await callback.answer()
+
+
+# ── em:rename:{id} — prompt for new name ─────────────────────────────────────
+
+@router.callback_query(F.data.startswith("em:rename:"))
+async def em_cb_rename(callback: CallbackQuery, fsm: FSMContext) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    await fsm.set_state(EmpWizard.rename)
+    await fsm.update_data(emp_id=emp_id)
+    await callback.message.edit_text(
+        f"Введите новое имя для {emp['name']}:",
+        reply_markup=_emp_cancel_kb(),
+    )
+    await callback.answer()
+
+
+# ── em:del:{id} — delete confirmation card ────────────────────────────────────
+
+@router.callback_query(F.data.startswith("em:del:"))
+async def em_cb_delete(callback: CallbackQuery) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    stats = await db.get_employee_stats(emp_id)
+    active = stats["active"]
+    if active:
+        n = active
+        suffix = "а" if n == 1 else "и" if 2 <= n <= 4 else ""
+        warning = f" У него {n} активных задач{suffix}. Они будут отменены."
+    else:
+        warning = ""
+    await callback.message.edit_text(
+        f"Удалить {emp['name']}?{warning}",
+        reply_markup=_emp_delete_kb(emp_id),
+    )
+    await callback.answer()
+
+
+# ── em:delok:{id} — confirmed delete ──────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("em:delok:"))
+async def em_cb_delete_ok(callback: CallbackQuery) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.get_employee_by_id(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник уже удалён.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return
+    name = emp["name"]
+    await db.delete_employee(emp_id)
+    employees = await db.list_employees()
+    if employees:
+        await callback.message.edit_text(
+            f"Сотрудник {name} удалён.\n\nВыберите сотрудника:",
+            reply_markup=_emp_list_kb(employees),
+        )
+    else:
+        await callback.message.edit_text(f"Сотрудник {name} удалён. Список пуст.")
+    await callback.answer(f"{name} удалён.")
+
+
+# ── em:newcode:{id} — generate new registration code ─────────────────────────
+
+@router.callback_query(F.data.startswith("em:newcode:"))
+async def em_cb_newcode(callback: CallbackQuery) -> None:
+    emp_id = int(callback.data.split(":")[-1])
+    emp = await db.reset_employee_code(emp_id)
+    if not emp:
+        await callback.answer("Сотрудник не найден.", show_alert=True)
+        return
+    text = (
+        f"Новый код для {emp['name']}: {emp['reg_code']}\n\n"
+        f"Сотрудник должен написать боту:\n/start {emp['reg_code']}"
+    )
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="← К сотруднику", callback_data=f"em:card:{emp_id}")]
+    ])
+    await callback.message.edit_text(text, reply_markup=back_kb)
+    await callback.answer()
+
+
+# ── em:cancel — cancel rename and return to card ──────────────────────────────
+
+@router.callback_query(F.data == "em:cancel")
+async def em_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
+    data = await fsm.get_data()
+    emp_id = data.get("emp_id")
+    await fsm.clear()
+    if emp_id:
+        emp = await db.get_employee_by_id(emp_id)
+        if emp:
+            stats = await db.get_employee_stats(emp_id)
+            await callback.message.edit_text(
+                _format_emp_card(emp, stats), reply_markup=_emp_card_kb(emp_id)
+            )
+            await callback.answer()
+            return
+    employees = await db.list_employees()
+    if employees:
+        await callback.message.edit_text("Выберите сотрудника:", reply_markup=_emp_list_kb(employees))
+    else:
+        await callback.message.edit_text("Нет сотрудников.")
+    await callback.answer()
+
+
+# ── EmpWizard.rename — receive new name text ──────────────────────────────────
+
+@router.message(EmpWizard.rename)
+async def emp_rename_input(message: Message, fsm: FSMContext) -> None:
+    new_name = (message.text or "").strip()
+    if not new_name:
+        await message.answer("Введите непустое имя:", reply_markup=_emp_cancel_kb())
+        return
+    data = await fsm.get_data()
+    emp_id = data.get("emp_id")
+    await fsm.clear()
+    emp = await db.rename_employee(emp_id, new_name)
+    if emp:
+        stats = await db.get_employee_stats(emp_id)
+        await message.answer(
+            f"Имя изменено.\n\n{_format_emp_card(emp, stats)}",
+            reply_markup=_emp_card_kb(emp_id),
+        )
+    else:
+        await message.answer("Сотрудник не найден.", reply_markup=_ADMIN_KB)
+
+
+# ── EmpWizard catch-all ────────────────────────────────────────────────────────
+
+@router.message(StateFilter(EmpWizard))
+async def emp_unexpected(message: Message, fsm: FSMContext) -> None:
+    if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
+        await fsm.clear()
+        await message.answer("Отменено.", reply_markup=_ADMIN_KB)
+    else:
+        await message.answer("Введите новое имя или нажмите ❌ Отмена.", reply_markup=_emp_cancel_kb())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
