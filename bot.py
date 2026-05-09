@@ -434,11 +434,6 @@ async def cmd_id(message: Message) -> None:
 # FSM Wizard handlers  (registered BEFORE the catch-all handle_message)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _is_admin(message: Message) -> bool:
-    """Runtime admin check — avoids capturing ADMIN_ID at decoration time."""
-    return message.from_user is not None and message.from_user.id == config.ADMIN_ID
-
-
 async def _wiz_launch(message: Message, fsm: FSMContext) -> None:
     """Core wizard launch logic, callable from multiple entry points."""
     await fsm.clear()
@@ -460,8 +455,10 @@ async def _wiz_launch(message: Message, fsm: FSMContext) -> None:
 
 # ── Start: "Новая задача" button ───────────────────────────────────────────────
 
-@router.message(F.text == "Новая задача", _is_admin)
+@router.message(F.text == "Новая задача")
 async def wiz_start(message: Message, fsm: FSMContext) -> None:
+    if message.from_user.id != config.ADMIN_ID:
+        return
     await _wiz_launch(message, fsm)
 
 
