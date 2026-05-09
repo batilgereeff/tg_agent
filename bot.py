@@ -434,12 +434,20 @@ async def cmd_id(message: Message) -> None:
 # FSM Wizard handlers  (registered BEFORE the catch-all handle_message)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Start: "Новая задача" button ───────────────────────────────────────────────
+def _is_admin(message: Message) -> bool:
+    """Runtime admin check — avoids capturing ADMIN_ID at decoration time."""
+    return message.from_user is not None and message.from_user.id == config.ADMIN_ID
 
-@router.message(F.text == "Новая задача", F.from_user.id == config.ADMIN_ID)
-async def wiz_start(message: Message, fsm: FSMContext) -> None:
+
+async def _wiz_launch(message: Message, fsm: FSMContext) -> None:
+    """Core wizard launch logic, callable from multiple entry points."""
     await fsm.clear()
-    employees = await db.list_employees()
+    try:
+        employees = await db.list_employees()
+    except Exception as exc:
+        logger.error("wiz_start db error: %s", exc)
+        await message.answer("Ошибка базы данных. Попробуйте ещё раз.", reply_markup=_ADMIN_KB)
+        return
     if not employees:
         await message.answer(
             "Нет сотрудников. Сначала добавьте командой:\nДобавь сотрудника Иванов",
@@ -448,6 +456,13 @@ async def wiz_start(message: Message, fsm: FSMContext) -> None:
         return
     await fsm.set_state(TaskWizard.choose_employee)
     await message.answer("Шаг 1/6 — Кому назначить?", reply_markup=_wiz_employee_kb(employees))
+
+
+# ── Start: "Новая задача" button ───────────────────────────────────────────────
+
+@router.message(F.text == "Новая задача", _is_admin)
+async def wiz_start(message: Message, fsm: FSMContext) -> None:
+    await _wiz_launch(message, fsm)
 
 
 # ── Universal cancel (inline button) ──────────────────────────────────────────
@@ -545,7 +560,7 @@ async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
         await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
     else:
         await fsm.set_state(TaskWizard.choose_priority)
-        await message.answer(f"Дедлайн: {display}\n\nШаг 5/7 — Приоритет:", reply_markup=_wiz_priority_kb())
+        await message.answer(f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет?", reply_markup=_wiz_priority_kb())
 
 
 # ── Step 4: priority ───────────────────────────────────────────────────────────
@@ -1013,7 +1028,7 @@ async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.message()
-async def handle_message(message: Message, bot: Bot) -> None:
+async def handle_message(message: Message, fsm: FSMContext, bot: Bot) -> None:
     if not message.text:
         await message.answer("Отправьте текстовое сообщение.")
         return
@@ -1021,6 +1036,11 @@ async def handle_message(message: Message, bot: Bot) -> None:
     uid = message.from_user.id
     is_admin = uid == config.ADMIN_ID
     text = message.text.strip()
+
+    # Fallback: if wiz_start filter somehow missed, catch it here
+    if is_admin and text == "Новая задача":
+        await _wiz_launch(message, fsm)
+        return
 
     if not is_admin:
         emp = await db.get_employee_by_telegram_id(uid)
