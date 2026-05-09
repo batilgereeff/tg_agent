@@ -421,7 +421,7 @@ async def cmd_clear(message: Message, state: FSMContext) -> None:
     _histories.pop(uid, None)
     _st.clear_pending(uid)
     _st.end_new_task_mode(uid)
-    await fsm.clear()
+    await state.clear()
     await message.answer("История диалога очищена.", reply_markup=_role_kb(uid == config.ADMIN_ID))
 
 
@@ -436,7 +436,7 @@ async def cmd_id(message: Message) -> None:
 
 async def _wiz_launch(message: Message, state: FSMContext) -> None:
     """Core wizard launch logic, callable from multiple entry points."""
-    await fsm.clear()
+    await state.clear()
     try:
         employees = await db.list_employees()
     except Exception as exc:
@@ -449,7 +449,7 @@ async def _wiz_launch(message: Message, state: FSMContext) -> None:
             reply_markup=_ADMIN_KB,
         )
         return
-    await fsm.set_state(TaskWizard.choose_employee)
+    await state.set_state(TaskWizard.choose_employee)
     await message.answer("Шаг 1/6 — Кому назначить?", reply_markup=_wiz_employee_kb(employees))
 
 
@@ -459,14 +459,14 @@ async def _wiz_launch(message: Message, state: FSMContext) -> None:
 async def wiz_start(message: Message, state: FSMContext) -> None:
     if message.from_user.id != config.ADMIN_ID:
         return
-    await _wiz_launch(message, fsm)
+    await _wiz_launch(message, state)
 
 
 # ── Universal cancel (inline button) ──────────────────────────────────────────
 
 @router.callback_query(F.data == "tw:cancel")
 async def wiz_cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    await fsm.clear()
+    await state.clear()
     await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
     await callback.answer()
@@ -481,17 +481,17 @@ async def wiz_cb_employee(callback: CallbackQuery, state: FSMContext) -> None:
     if not emp:
         await callback.answer("Сотрудник не найден.", show_alert=True)
         return
-    await fsm.update_data(
+    await state.update_data(
         employee_id=emp["id"],
         employee_name=emp["name"],
         employee_telegram_id=emp.get("telegram_id"),
     )
     await _safe_edit(callback.message, markup=None)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.enter_description)
+        await state.set_state(TaskWizard.enter_description)
         await callback.message.answer(
             f"Сотрудник: {emp['name']}\n\nШаг 2/6 — Опишите задачу:",
             reply_markup=_wiz_cancel_only_kb(),
@@ -504,12 +504,12 @@ async def wiz_cb_employee(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(TaskWizard.enter_description)
 async def wiz_description(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
-    await fsm.update_data(description=text)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await state.update_data(description=text)
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.choose_deadline)
+        await state.set_state(TaskWizard.choose_deadline)
         await message.answer(f"Задача: {text}\n\nШаг 3/6 — Дедлайн?", reply_markup=_wiz_deadline_kb())
 
 
@@ -521,7 +521,7 @@ async def wiz_cb_deadline(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_edit(callback.message, markup=None)
 
     if preset == "manual":
-        await fsm.set_state(TaskWizard.enter_deadline_manual)
+        await state.set_state(TaskWizard.enter_deadline_manual)
         await callback.message.answer(
             "Введите дедлайн в формате: 15.05.2026 18:00",
             reply_markup=_wiz_cancel_only_kb(),
@@ -530,12 +530,12 @@ async def wiz_cb_deadline(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     iso, display = _deadline_from_preset(preset)
-    await fsm.update_data(deadline=iso, deadline_display=display)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await state.update_data(deadline=iso, deadline_display=display)
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.choose_priority)
+        await state.set_state(TaskWizard.choose_priority)
         await callback.message.answer(
             f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет?", reply_markup=_wiz_priority_kb()
         )
@@ -551,12 +551,12 @@ async def wiz_deadline_manual(message: Message, state: FSMContext) -> None:
         await message.answer(err, reply_markup=_wiz_cancel_only_kb())
         return
     display = datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
-    await fsm.update_data(deadline=iso, deadline_display=display)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await state.update_data(deadline=iso, deadline_display=display)
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.choose_priority)
+        await state.set_state(TaskWizard.choose_priority)
         await message.answer(f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет?", reply_markup=_wiz_priority_kb())
 
 
@@ -565,13 +565,13 @@ async def wiz_deadline_manual(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("tw:pr:"), StateFilter(TaskWizard.choose_priority))
 async def wiz_cb_priority(callback: CallbackQuery, state: FSMContext) -> None:
     priority = callback.data.split(":")[-1]
-    await fsm.update_data(priority=priority)
+    await state.update_data(priority=priority)
     await _safe_edit(callback.message, markup=None)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.choose_category)
+        await state.set_state(TaskWizard.choose_category)
         await callback.message.answer(
             f"Приоритет: {PRIORITY_DISPLAY.get(priority, priority)}\n\nШаг 5/6 — Категория?",
             reply_markup=_wiz_category_kb(),
@@ -584,13 +584,13 @@ async def wiz_cb_priority(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("tw:cat:"), StateFilter(TaskWizard.choose_category))
 async def wiz_cb_category(callback: CallbackQuery, state: FSMContext) -> None:
     category = callback.data.split(":")[-1]
-    await fsm.update_data(category=category)
+    await state.update_data(category=category)
     await _safe_edit(callback.message, markup=None)
-    if (await fsm.get_data()).get("editing"):
-        await fsm.set_state(TaskWizard.confirm)
-        await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    if (await state.get_data()).get("editing"):
+        await state.set_state(TaskWizard.confirm)
+        await callback.message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     else:
-        await fsm.set_state(TaskWizard.enter_comment)
+        await state.set_state(TaskWizard.enter_comment)
         await callback.message.answer(
             f"Категория: {CATEGORY_DISPLAY.get(category, category)}\n\n"
             "Шаг 6/6 — Комментарий?\nВведите текст или нажмите Пропустить:",
@@ -603,17 +603,17 @@ async def wiz_cb_category(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(TaskWizard.enter_comment)
 async def wiz_comment(message: Message, state: FSMContext) -> None:
-    await fsm.update_data(comment=(message.text or "").strip() or None)
-    await fsm.set_state(TaskWizard.confirm)
-    await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await state.update_data(comment=(message.text or "").strip() or None)
+    await state.set_state(TaskWizard.confirm)
+    await message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
 
 
 @router.callback_query(F.data == "tw:skip_comment", StateFilter(TaskWizard.enter_comment))
 async def wiz_cb_skip_comment(callback: CallbackQuery, state: FSMContext) -> None:
-    await fsm.update_data(comment=None)
-    await fsm.set_state(TaskWizard.confirm)
+    await state.update_data(comment=None)
+    await state.set_state(TaskWizard.confirm)
     await _safe_edit(callback.message, markup=None)
-    await callback.message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+    await callback.message.answer(_format_task_card(await state.get_data()), reply_markup=_wiz_confirm_kb())
     await callback.answer()
 
 
@@ -621,8 +621,8 @@ async def wiz_cb_skip_comment(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data == "tw:confirm", StateFilter(TaskWizard.confirm))
 async def wiz_cb_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    data = await fsm.get_data()
-    await fsm.clear()
+    data = await state.get_data()
+    await state.clear()
     await _safe_edit(callback.message, markup=None)
     reply = await _do_create_task_fsm(data, bot)
     await callback.message.answer(reply, reply_markup=_ADMIN_KB)
@@ -631,7 +631,7 @@ async def wiz_cb_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -
 
 @router.callback_query(F.data == "tw:edit", StateFilter(TaskWizard.confirm))
 async def wiz_cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    await fsm.set_state(TaskWizard.edit_field)
+    await state.set_state(TaskWizard.edit_field)
     await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Что изменить?", reply_markup=_wiz_edit_field_kb())
     await callback.answer()
@@ -640,27 +640,27 @@ async def wiz_cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("tw:ef:"), StateFilter(TaskWizard.edit_field))
 async def wiz_cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
     field = callback.data.split(":")[-1]
-    await fsm.update_data(editing=True)
+    await state.update_data(editing=True)
     await _safe_edit(callback.message, markup=None)
 
     if field == "employee":
         employees = await db.list_employees()
-        await fsm.set_state(TaskWizard.choose_employee)
+        await state.set_state(TaskWizard.choose_employee)
         await callback.message.answer("Кому назначить?", reply_markup=_wiz_employee_kb(employees))
     elif field == "description":
-        await fsm.set_state(TaskWizard.enter_description)
+        await state.set_state(TaskWizard.enter_description)
         await callback.message.answer("Опишите задачу текстом:", reply_markup=_wiz_cancel_only_kb())
     elif field == "deadline":
-        await fsm.set_state(TaskWizard.choose_deadline)
+        await state.set_state(TaskWizard.choose_deadline)
         await callback.message.answer("Выберите дедлайн:", reply_markup=_wiz_deadline_kb())
     elif field == "priority":
-        await fsm.set_state(TaskWizard.choose_priority)
+        await state.set_state(TaskWizard.choose_priority)
         await callback.message.answer("Выберите приоритет:", reply_markup=_wiz_priority_kb())
     elif field == "category":
-        await fsm.set_state(TaskWizard.choose_category)
+        await state.set_state(TaskWizard.choose_category)
         await callback.message.answer("Выберите категорию:", reply_markup=_wiz_category_kb())
     elif field == "comment":
-        await fsm.set_state(TaskWizard.enter_comment)
+        await state.set_state(TaskWizard.enter_comment)
         await callback.message.answer(
             "Введите комментарий или нажмите Пропустить:",
             reply_markup=_wiz_comment_kb(),
@@ -673,7 +673,7 @@ async def wiz_cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(StateFilter(TaskWizard))
 async def wiz_unexpected(message: Message, state: FSMContext) -> None:
     if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
-        await fsm.clear()
+        await state.clear()
         await message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
     else:
         await message.answer("Используйте кнопки для навигации или нажмите ❌ Отмена.")
@@ -819,8 +819,8 @@ async def em_cb_rename(callback: CallbackQuery, state: FSMContext) -> None:
     if not emp:
         await callback.answer("Сотрудник не найден.", show_alert=True)
         return
-    await fsm.set_state(EmpWizard.rename)
-    await fsm.update_data(emp_id=emp_id)
+    await state.set_state(EmpWizard.rename)
+    await state.update_data(emp_id=emp_id)
     await _safe_edit(
         callback.message,
         text=f"Введите новое имя для {emp['name']}:",
@@ -901,9 +901,9 @@ async def em_cb_newcode(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "em:cancel")
 async def em_cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await fsm.get_data()
+    data = await state.get_data()
     emp_id = data.get("emp_id")
-    await fsm.clear()
+    await state.clear()
     if emp_id:
         emp = await db.get_employee_by_id(emp_id)
         if emp:
@@ -927,9 +927,9 @@ async def emp_rename_input(message: Message, state: FSMContext) -> None:
     if not new_name:
         await message.answer("Введите непустое имя:", reply_markup=_emp_cancel_kb())
         return
-    data = await fsm.get_data()
+    data = await state.get_data()
     emp_id = data.get("emp_id")
-    await fsm.clear()
+    await state.clear()
     emp = await db.rename_employee(emp_id, new_name)
     if emp:
         stats = await db.get_employee_stats(emp_id)
@@ -946,7 +946,7 @@ async def emp_rename_input(message: Message, state: FSMContext) -> None:
 @router.message(StateFilter(EmpWizard))
 async def emp_unexpected(message: Message, state: FSMContext) -> None:
     if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
-        await fsm.clear()
+        await state.clear()
         await message.answer("Отменено.", reply_markup=_ADMIN_KB)
     else:
         await message.answer("Введите новое имя или нажмите ❌ Отмена.", reply_markup=_emp_cancel_kb())
@@ -1036,7 +1036,7 @@ async def handle_message(message: Message, state: FSMContext, bot: Bot) -> None:
 
     # Fallback: if wiz_start filter somehow missed, catch it here
     if is_admin and text == "Новая задача":
-        await _wiz_launch(message, fsm)
+        await _wiz_launch(message, state)
         return
 
     if not is_admin:
