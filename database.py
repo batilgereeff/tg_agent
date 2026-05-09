@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS employees (
 CREATE TABLE IF NOT EXISTS tasks (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     employee_id       INTEGER NOT NULL REFERENCES employees(id),
+    title             TEXT,
     description       TEXT NOT NULL,
     deadline          TEXT,
     priority          TEXT DEFAULT 'normal',
@@ -33,6 +34,7 @@ _MIGRATIONS = [
     "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'normal'",
     "ALTER TABLE tasks ADD COLUMN category TEXT",
     "ALTER TABLE tasks ADD COLUMN comment  TEXT",
+    "ALTER TABLE tasks ADD COLUMN title    TEXT",
 ]
 
 
@@ -134,17 +136,18 @@ async def create_task(
     priority: str = "normal",
     category: Optional[str] = None,
     comment: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> dict:
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         cur = await conn.execute(
-            "INSERT INTO tasks (employee_id, description, deadline, priority, category, comment)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (employee_id, description, deadline, priority, category, comment),
+            "INSERT INTO tasks (employee_id, title, description, deadline, priority, category, comment)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (employee_id, title, description, deadline, priority, category, comment),
         )
         await conn.commit()
         return {
             "id": cur.lastrowid, "employee_id": employee_id,
-            "description": description, "deadline": deadline,
+            "title": title, "description": description, "deadline": deadline,
             "priority": priority, "category": category,
             "comment": comment, "status": "new",
         }

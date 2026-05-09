@@ -68,6 +68,7 @@ _REMOVE_KB = ReplyKeyboardRemove()
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TaskWizard(StatesGroup):
+    enter_title          = State()
     choose_employee      = State()
     enter_description    = State()
     choose_deadline      = State()
@@ -203,6 +204,7 @@ def _wiz_confirm_kb() -> InlineKeyboardMarkup:
 
 def _wiz_edit_field_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Название",    callback_data="tw:ef:title")],
         [InlineKeyboardButton(text="Сотрудник",   callback_data="tw:ef:employee")],
         [InlineKeyboardButton(text="Задача",       callback_data="tw:ef:description")],
         [InlineKeyboardButton(text="Дедлайн",     callback_data="tw:ef:deadline")],
@@ -220,6 +222,7 @@ def _format_task_card(data: dict) -> str:
     comment_str  = data.get("comment") or "—"
     return (
         "Проверьте задачу:\n\n"
+        f"Название: {data.get('title', '—')}\n"
         f"Сотрудник: {data.get('employee_name', '—')}\n"
         f"Задача: {data.get('description', '—')}\n"
         f"Дедлайн: {deadline_str}\n"
@@ -301,6 +304,7 @@ async def _do_create_task(uid: int, pending: dict, bot: Bot) -> str:
 async def _do_create_task_fsm(data: dict, bot: Bot) -> str:
     task = await db.create_task(
         employee_id=data["employee_id"],
+        title=data.get("title"),
         description=data["description"],
         deadline=data.get("deadline"),
         priority=data.get("priority", "normal"),
@@ -312,7 +316,8 @@ async def _do_create_task_fsm(data: dict, bot: Bot) -> str:
     if emp_tid:
         dl = fmt_deadline(data.get("deadline"))
         cat = CATEGORY_DISPLAY.get(data.get("category", ""), "")
-        lines = [f"Вам назначена задача #{task['id']}\n", data["description"]]
+        title_line = f"Название: {data['title']}\n" if data.get("title") else ""
+        lines = [f"Вам назначена задача #{task['id']}\n{title_line}", data["description"]]
         if dl:                  lines.append(f"Дедлайн: {dl}")
         if cat:                 lines.append(f"Категория: {cat}")
         if data.get("comment"): lines.append(f"Комментарий: {data['comment']}")
@@ -322,8 +327,10 @@ async def _do_create_task_fsm(data: dict, bot: Bot) -> str:
         except Exception as e:
             logger.warning("Notify employee failed: %s", e)
 
+    title_part = f"Название: {data['title']}\n" if data.get("title") else ""
     return (
         f"Задача #{task['id']} создана.\n\n"
+        f"{title_part}"
         f"Сотрудник: {data['employee_name']}\n"
         f"Задача: {data['description']}\n"
         + ("Уведомление отправлено сотруднику." if notified
@@ -434,15 +441,33 @@ async def cmd_id(message: Message) -> None:
 
 @router.message(F.text == "Новая задача", F.from_user.id == config.ADMIN_ID, StateFilter(None))
 async def wiz_start(message: Message, fsm: FSMContext) -> None:
+    await fsm.set_state(TaskWizard.enter_title)
+    await message.answer("Шаг 1/7 — Введите название задачи:", reply_markup=_wiz_cancel_only_kb())
+
+
+# ── Step 0 → 1: title entered ─────────────────────────────────────────────────
+
+@router.message(TaskWizard.enter_title)
+async def wiz_title(message: Message, fsm: FSMContext) -> None:
+    title = (message.text or "").strip()
+    if not title:
+        await message.answer("Название не может быть пустым. Введите название задачи:")
+        return
+    await fsm.update_data(title=title)
+    if (await fsm.get_data()).get("editing"):
+        await fsm.set_state(TaskWizard.confirm)
+        await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
+        return
     employees = await db.list_employees()
     if not employees:
+        await fsm.clear()
         await message.answer(
             "Нет сотрудников. Сначала добавьте командой:\nДобавь сотрудника Иванов",
             reply_markup=_ADMIN_KB,
         )
         return
     await fsm.set_state(TaskWizard.choose_employee)
-    await message.answer("Шаг 1/6 — Кому назначить?", reply_markup=_wiz_employee_kb(employees))
+    await message.answer(f"Название: {title}\n\nШаг 2/7 — Кому назначить?", reply_markup=_wiz_employee_kb(employees))
 
 
 # ── Universal cancel (inline button) ──────────────────────────────────────────
@@ -476,7 +501,7 @@ async def wiz_cb_employee(callback: CallbackQuery, fsm: FSMContext) -> None:
     else:
         await fsm.set_state(TaskWizard.enter_description)
         await callback.message.answer(
-            f"Сотрудник: {emp['name']}\n\nШаг 2/6 — Опишите задачу текстом:",
+            f"Сотрудник: {emp['name']}\n\nШаг 3/7 — Опишите задачу текстом:",
             reply_markup=_wiz_cancel_only_kb(),
         )
     await callback.answer()
@@ -493,7 +518,7 @@ async def wiz_description(message: Message, fsm: FSMContext) -> None:
         await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
     else:
         await fsm.set_state(TaskWizard.choose_deadline)
-        await message.answer(f"Задача: {text}\n\nШаг 3/6 — Дедлайн:", reply_markup=_wiz_deadline_kb())
+        await message.answer(f"Задача: {text}\n\nШаг 4/7 — Дедлайн:", reply_markup=_wiz_deadline_kb())
 
 
 # ── Step 3: deadline preset ────────────────────────────────────────────────────
@@ -520,12 +545,12 @@ async def wiz_cb_deadline(callback: CallbackQuery, fsm: FSMContext) -> None:
     else:
         await fsm.set_state(TaskWizard.choose_priority)
         await callback.message.answer(
-            f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет:", reply_markup=_wiz_priority_kb()
+            f"Дедлайн: {display}\n\nШаг 5/7 — Приоритет:", reply_markup=_wiz_priority_kb()
         )
     await callback.answer()
 
 
-# ── Step 3b: manual deadline input ────────────────────────────────────────────
+# ── Step 4b: manual deadline input ────────────────────────────────────────────
 
 @router.message(TaskWizard.enter_deadline_manual)
 async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
@@ -540,7 +565,7 @@ async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
         await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
     else:
         await fsm.set_state(TaskWizard.choose_priority)
-        await message.answer(f"Дедлайн: {display}\n\nШаг 4/6 — Приоритет:", reply_markup=_wiz_priority_kb())
+        await message.answer(f"Дедлайн: {display}\n\nШаг 5/7 — Приоритет:", reply_markup=_wiz_priority_kb())
 
 
 # ── Step 4: priority ───────────────────────────────────────────────────────────
@@ -556,7 +581,7 @@ async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
     else:
         await fsm.set_state(TaskWizard.choose_category)
         await callback.message.answer(
-            f"Приоритет: {PRIORITY_DISPLAY.get(priority, priority)}\n\nШаг 5/6 — Категория:",
+            f"Приоритет: {PRIORITY_DISPLAY.get(priority, priority)}\n\nШаг 6/7 — Категория:",
             reply_markup=_wiz_category_kb(),
         )
     await callback.answer()
@@ -576,7 +601,7 @@ async def wiz_cb_category(callback: CallbackQuery, fsm: FSMContext) -> None:
         await fsm.set_state(TaskWizard.enter_comment)
         await callback.message.answer(
             f"Категория: {CATEGORY_DISPLAY.get(category, category)}\n\n"
-            "Шаг 6/6 — Комментарий?\nВведите текст или нажмите Пропустить:",
+            "Шаг 7/7 — Комментарий?\nВведите текст или нажмите Пропустить:",
             reply_markup=_wiz_comment_kb(),
         )
     await callback.answer()
@@ -626,7 +651,10 @@ async def wiz_cb_edit_field(callback: CallbackQuery, fsm: FSMContext) -> None:
     await fsm.update_data(editing=True)
     await _safe_edit(callback.message, markup=None)
 
-    if field == "employee":
+    if field == "title":
+        await fsm.set_state(TaskWizard.enter_title)
+        await callback.message.answer("Введите название задачи:", reply_markup=_wiz_cancel_only_kb())
+    elif field == "employee":
         employees = await db.list_employees()
         await fsm.set_state(TaskWizard.choose_employee)
         await callback.message.answer("Кому назначить?", reply_markup=_wiz_employee_kb(employees))
