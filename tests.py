@@ -282,15 +282,15 @@ class TestKeyboardBuilders(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestFSMStates(unittest.TestCase):
-    def test_ten_states_defined(self):
+    def test_nine_states_defined(self):
         from bot import TaskWizard
-        self.assertEqual(len(TaskWizard.__states__), 10)
+        self.assertEqual(len(TaskWizard.__states__), 9)
 
     def test_all_expected_states_present(self):
         from bot import TaskWizard
         names = {s.state.split(":")[-1] for s in TaskWizard.__states__}
         expected = {
-            "enter_title", "choose_employee", "enter_description", "choose_deadline",
+            "choose_employee", "enter_description", "choose_deadline",
             "enter_deadline_manual", "choose_priority", "choose_category",
             "enter_comment", "confirm", "edit_field",
         }
