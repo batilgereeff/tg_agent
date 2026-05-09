@@ -416,7 +416,7 @@ async def _send_help(message: Message, is_admin: bool) -> None:
 
 
 @router.message(Command("clear"))
-async def cmd_clear(message: Message, fsm: FSMContext) -> None:
+async def cmd_clear(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     _histories.pop(uid, None)
     _st.clear_pending(uid)
@@ -434,7 +434,7 @@ async def cmd_id(message: Message) -> None:
 # FSM Wizard handlers  (registered BEFORE the catch-all handle_message)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _wiz_launch(message: Message, fsm: FSMContext) -> None:
+async def _wiz_launch(message: Message, state: FSMContext) -> None:
     """Core wizard launch logic, callable from multiple entry points."""
     await fsm.clear()
     try:
@@ -456,7 +456,7 @@ async def _wiz_launch(message: Message, fsm: FSMContext) -> None:
 # ── Start: "Новая задача" button ───────────────────────────────────────────────
 
 @router.message(F.text == "Новая задача")
-async def wiz_start(message: Message, fsm: FSMContext) -> None:
+async def wiz_start(message: Message, state: FSMContext) -> None:
     if message.from_user.id != config.ADMIN_ID:
         return
     await _wiz_launch(message, fsm)
@@ -465,7 +465,7 @@ async def wiz_start(message: Message, fsm: FSMContext) -> None:
 # ── Universal cancel (inline button) ──────────────────────────────────────────
 
 @router.callback_query(F.data == "tw:cancel")
-async def wiz_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await fsm.clear()
     await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
@@ -475,7 +475,7 @@ async def wiz_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 1 → 2: employee selected ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("tw:emp:"), StateFilter(TaskWizard.choose_employee))
-async def wiz_cb_employee(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_employee(callback: CallbackQuery, state: FSMContext) -> None:
     emp_id = int(callback.data.split(":")[-1])
     emp = await db.get_employee_by_id(emp_id)
     if not emp:
@@ -502,7 +502,7 @@ async def wiz_cb_employee(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 2: description text ───────────────────────────────────────────────────
 
 @router.message(TaskWizard.enter_description)
-async def wiz_description(message: Message, fsm: FSMContext) -> None:
+async def wiz_description(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     await fsm.update_data(description=text)
     if (await fsm.get_data()).get("editing"):
@@ -516,7 +516,7 @@ async def wiz_description(message: Message, fsm: FSMContext) -> None:
 # ── Step 3: deadline preset ────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("tw:dl:"), StateFilter(TaskWizard.choose_deadline))
-async def wiz_cb_deadline(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_deadline(callback: CallbackQuery, state: FSMContext) -> None:
     preset = callback.data.split(":")[-1]
     await _safe_edit(callback.message, markup=None)
 
@@ -545,7 +545,7 @@ async def wiz_cb_deadline(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 4b: manual deadline input ────────────────────────────────────────────
 
 @router.message(TaskWizard.enter_deadline_manual)
-async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
+async def wiz_deadline_manual(message: Message, state: FSMContext) -> None:
     iso, err = _parse_manual_deadline(message.text or "")
     if err:
         await message.answer(err, reply_markup=_wiz_cancel_only_kb())
@@ -563,7 +563,7 @@ async def wiz_deadline_manual(message: Message, fsm: FSMContext) -> None:
 # ── Step 4: priority ───────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("tw:pr:"), StateFilter(TaskWizard.choose_priority))
-async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_priority(callback: CallbackQuery, state: FSMContext) -> None:
     priority = callback.data.split(":")[-1]
     await fsm.update_data(priority=priority)
     await _safe_edit(callback.message, markup=None)
@@ -582,7 +582,7 @@ async def wiz_cb_priority(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 5: category ───────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("tw:cat:"), StateFilter(TaskWizard.choose_category))
-async def wiz_cb_category(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_category(callback: CallbackQuery, state: FSMContext) -> None:
     category = callback.data.split(":")[-1]
     await fsm.update_data(category=category)
     await _safe_edit(callback.message, markup=None)
@@ -602,14 +602,14 @@ async def wiz_cb_category(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 6: comment text ───────────────────────────────────────────────────────
 
 @router.message(TaskWizard.enter_comment)
-async def wiz_comment(message: Message, fsm: FSMContext) -> None:
+async def wiz_comment(message: Message, state: FSMContext) -> None:
     await fsm.update_data(comment=(message.text or "").strip() or None)
     await fsm.set_state(TaskWizard.confirm)
     await message.answer(_format_task_card(await fsm.get_data()), reply_markup=_wiz_confirm_kb())
 
 
 @router.callback_query(F.data == "tw:skip_comment", StateFilter(TaskWizard.enter_comment))
-async def wiz_cb_skip_comment(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_skip_comment(callback: CallbackQuery, state: FSMContext) -> None:
     await fsm.update_data(comment=None)
     await fsm.set_state(TaskWizard.confirm)
     await _safe_edit(callback.message, markup=None)
@@ -620,7 +620,7 @@ async def wiz_cb_skip_comment(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Step 7: confirm / edit / cancel ───────────────────────────────────────────
 
 @router.callback_query(F.data == "tw:confirm", StateFilter(TaskWizard.confirm))
-async def wiz_cb_confirm(callback: CallbackQuery, fsm: FSMContext, bot: Bot) -> None:
+async def wiz_cb_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await fsm.get_data()
     await fsm.clear()
     await _safe_edit(callback.message, markup=None)
@@ -630,7 +630,7 @@ async def wiz_cb_confirm(callback: CallbackQuery, fsm: FSMContext, bot: Bot) -> 
 
 
 @router.callback_query(F.data == "tw:edit", StateFilter(TaskWizard.confirm))
-async def wiz_cb_edit(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await fsm.set_state(TaskWizard.edit_field)
     await _safe_edit(callback.message, markup=None)
     await callback.message.answer("Что изменить?", reply_markup=_wiz_edit_field_kb())
@@ -638,7 +638,7 @@ async def wiz_cb_edit(callback: CallbackQuery, fsm: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("tw:ef:"), StateFilter(TaskWizard.edit_field))
-async def wiz_cb_edit_field(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def wiz_cb_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
     field = callback.data.split(":")[-1]
     await fsm.update_data(editing=True)
     await _safe_edit(callback.message, markup=None)
@@ -671,7 +671,7 @@ async def wiz_cb_edit_field(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── Catch-all for unexpected text during wizard (shows hint) ──────────────────
 
 @router.message(StateFilter(TaskWizard))
-async def wiz_unexpected(message: Message, fsm: FSMContext) -> None:
+async def wiz_unexpected(message: Message, state: FSMContext) -> None:
     if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
         await fsm.clear()
         await message.answer("Создание задачи отменено.", reply_markup=_ADMIN_KB)
@@ -813,7 +813,7 @@ async def em_cb_tasks(callback: CallbackQuery) -> None:
 # ── em:rename:{id} — prompt for new name ─────────────────────────────────────
 
 @router.callback_query(F.data.startswith("em:rename:"))
-async def em_cb_rename(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def em_cb_rename(callback: CallbackQuery, state: FSMContext) -> None:
     emp_id = int(callback.data.split(":")[-1])
     emp = await db.get_employee_by_id(emp_id)
     if not emp:
@@ -900,7 +900,7 @@ async def em_cb_newcode(callback: CallbackQuery) -> None:
 # ── em:cancel — cancel rename and return to card ──────────────────────────────
 
 @router.callback_query(F.data == "em:cancel")
-async def em_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
+async def em_cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     data = await fsm.get_data()
     emp_id = data.get("emp_id")
     await fsm.clear()
@@ -922,7 +922,7 @@ async def em_cb_cancel(callback: CallbackQuery, fsm: FSMContext) -> None:
 # ── EmpWizard.rename — receive new name text ──────────────────────────────────
 
 @router.message(EmpWizard.rename)
-async def emp_rename_input(message: Message, fsm: FSMContext) -> None:
+async def emp_rename_input(message: Message, state: FSMContext) -> None:
     new_name = (message.text or "").strip()
     if not new_name:
         await message.answer("Введите непустое имя:", reply_markup=_emp_cancel_kb())
@@ -944,7 +944,7 @@ async def emp_rename_input(message: Message, fsm: FSMContext) -> None:
 # ── EmpWizard catch-all ────────────────────────────────────────────────────────
 
 @router.message(StateFilter(EmpWizard))
-async def emp_unexpected(message: Message, fsm: FSMContext) -> None:
+async def emp_unexpected(message: Message, state: FSMContext) -> None:
     if message.text and message.text.lower() in {"отмена", "cancel", "отменить"}:
         await fsm.clear()
         await message.answer("Отменено.", reply_markup=_ADMIN_KB)
@@ -1025,7 +1025,7 @@ async def cb_task_review(callback: CallbackQuery, bot: Bot) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @router.message()
-async def handle_message(message: Message, fsm: FSMContext, bot: Bot) -> None:
+async def handle_message(message: Message, state: FSMContext, bot: Bot) -> None:
     if not message.text:
         await message.answer("Отправьте текстовое сообщение.")
         return
