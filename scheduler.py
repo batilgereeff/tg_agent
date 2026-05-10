@@ -80,15 +80,32 @@ async def morning_digest(bot) -> None:
         tg_id = emp.get("telegram_id")
         if not tg_id:
             continue
-        active = [t for t in await db.list_tasks(employee_id=emp["id"]) if t["status"] != "done"]
+        tasks = await db.list_tasks(employee_id=emp["id"])
+        active = [t for t in tasks if t["status"] not in ("done", "cancelled")]
         if not active:
             continue
-        lines = [f"Доброе утро, {emp['name']}!\n\nВаши задачи:"]
-        for t in active:
-            dl = fmt_deadline(t.get("deadline")) or "без дедлайна"
-            status = STATUS_RU.get(t["status"], t["status"])
-            desc = t["description"][:60] + ("..." if len(t["description"]) > 60 else "")
-            lines.append(f"#{t['id']} | {status} | {desc} | {dl}")
+
+        overdue = [t for t in active if t["status"] == "overdue"]
+        regular = [t for t in active if t["status"] != "overdue"]
+
+        lines = [f"Доброе утро, {emp['name']}!\n"]
+
+        if overdue:
+            lines.append("ПРОСРОЧЕННЫЕ ЗАДАЧИ:")
+            for t in overdue:
+                dl = fmt_deadline(t.get("deadline")) or "—"
+                desc = t["description"][:60] + ("..." if len(t["description"]) > 60 else "")
+                lines.append(f"  ❗ #{t['id']} — {desc}\n     Дедлайн был: {dl}")
+            lines.append("")
+
+        if regular:
+            lines.append("Активные задачи:")
+            for t in regular:
+                dl = fmt_deadline(t.get("deadline")) or "без дедлайна"
+                status = STATUS_RU.get(t["status"], t["status"])
+                desc = t["description"][:60] + ("..." if len(t["description"]) > 60 else "")
+                lines.append(f"  #{t['id']} | {status} | {desc} | {dl}")
+
         try:
             await bot.send_message(tg_id, "\n".join(lines))
         except Exception as e:
