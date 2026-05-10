@@ -744,6 +744,42 @@ def _format_emp_card(emp: dict, stats: dict) -> str:
     )
 
 
+# ── "Статистика" reply-keyboard button ────────────────────────────────────────
+
+@router.message(F.text == "Статистика", StateFilter(None))
+async def handle_stats_btn(message: Message) -> None:
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    stats = await db.get_team_stats()
+    t = stats["totals"]
+    lines = [
+        "Статистика команды",
+        "",
+        f"Всего задач:   {t['total']}",
+        f"Новых:         {t['new']}",
+        f"В работе:      {t['in_progress']}",
+        f"На проверке:   {t['review']}",
+        f"Выполнено:     {t['done']}",
+        f"Просрочено:    {t['overdue']}",
+    ]
+    if stats["by_employee"]:
+        lines += ["", "По сотрудникам:"]
+        for e in stats["by_employee"]:
+            lines.append(
+                f"  {e['name']}: всего {e['total']} | "
+                f"новых {e['new_count']} | "
+                f"в работе {e['in_progress_count']} | "
+                f"готово {e['done_count']}"
+            )
+    if stats["overdue_tasks"]:
+        lines += ["", "Просроченные:"]
+        for task in stats["overdue_tasks"]:
+            dl = fmt_deadline(task.get("deadline")) or "—"
+            desc = task["description"][:50] + ("…" if len(task["description"]) > 50 else "")
+            lines.append(f"  #{task['id']} {task['employee_name']} — {desc} (дедлайн {dl})")
+    await message.answer("\n".join(lines), reply_markup=_ADMIN_KB)
+
+
 # ── "Список сотрудников" reply-keyboard button ─────────────────────────────────
 
 @router.message(F.text == "Список сотрудников", F.from_user.id == config.ADMIN_ID, StateFilter(None))
