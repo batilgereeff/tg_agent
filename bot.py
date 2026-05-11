@@ -49,11 +49,16 @@ async def _safe_edit(msg, text: str | None = None, markup=None) -> None:
 
 _ADMIN_KB = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Новая задача"),       KeyboardButton(text="Статистика")],
-        [KeyboardButton(text="Список сотрудников"),  KeyboardButton(text="Мои задачи")],
+        [KeyboardButton(text="Новая задача"),  KeyboardButton(text="Статистика")],
+        [KeyboardButton(text="Мои задачи"),    KeyboardButton(text="Настройки")],
     ],
     resize_keyboard=True,
 )
+
+def _settings_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Сотрудники", callback_data="settings:employees")],
+    ])
 
 _EMPLOYEE_KB = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Мои задачи"), KeyboardButton(text="Помощь")]],
@@ -742,6 +747,25 @@ def _format_emp_card(emp: dict, stats: dict) -> str:
         f"Активных задач: {stats['active']}\n"
         f"Выполненных: {stats['done']}"
     )
+
+
+# ── "Настройки" reply-keyboard button ─────────────────────────────────────────
+
+@router.message(F.text == "Настройки", StateFilter(None))
+async def handle_settings_btn(message: Message) -> None:
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    await message.answer("Настройки", reply_markup=_settings_kb())
+
+
+@router.callback_query(F.data == "settings:employees")
+async def settings_cb_employees(callback: CallbackQuery) -> None:
+    employees = await db.list_employees()
+    if not employees:
+        await callback.answer("Нет сотрудников", show_alert=True)
+        return
+    await _safe_edit(callback.message, text="Сотрудники:", markup=_emp_list_kb(employees))
+    await callback.answer()
 
 
 # ── "Статистика" reply-keyboard button ────────────────────────────────────────
