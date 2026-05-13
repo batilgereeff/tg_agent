@@ -55,9 +55,25 @@ _ADMIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# ── Каналы — замените названия и ссылки на свои ───────────────────────────────
+CHANNELS = [
+    {"name": "Канал 1", "url": "https://t.me/channel1"},
+    {"name": "Канал 2", "url": "https://t.me/channel2"},
+    {"name": "Канал 3", "url": "https://t.me/channel3"},
+    {"name": "Канал 4", "url": "https://t.me/channel4"},
+    {"name": "Канал 5", "url": "https://t.me/channel5"},
+]
+
+def _channels_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=ch["name"], url=ch["url"])]
+        for ch in CHANNELS
+    ])
+
 def _settings_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Сотрудники", callback_data="settings:employees")],
+        [InlineKeyboardButton(text="📢 Каналы",     callback_data="settings:channels")],
     ])
 
 _EMPLOYEE_KB = ReplyKeyboardMarkup(
@@ -765,6 +781,12 @@ async def settings_cb_employees(callback: CallbackQuery) -> None:
         await callback.answer("Нет сотрудников", show_alert=True)
         return
     await _safe_edit(callback.message, text="Сотрудники:", markup=_emp_list_kb(employees))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings:channels")
+async def settings_cb_channels(callback: CallbackQuery) -> None:
+    await _safe_edit(callback.message, text="Наши каналы:", markup=_channels_kb())
     await callback.answer()
 
 
