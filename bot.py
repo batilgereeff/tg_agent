@@ -17,6 +17,7 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 from aiogram.enums import ChatAction
 
@@ -47,13 +48,21 @@ async def _safe_edit(msg, text: str | None = None, markup=None) -> None:
 
 # ── Persistent reply keyboards ─────────────────────────────────────────────────
 
-_ADMIN_KB = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="Новая задача"),  KeyboardButton(text="Статистика")],
-        [KeyboardButton(text="Мои задачи"),    KeyboardButton(text="Настройки")],
-    ],
-    resize_keyboard=True,
-)
+def _make_admin_kb() -> ReplyKeyboardMarkup:
+    dashboard_btn = (
+        KeyboardButton(text="📊 Дашборд", web_app=WebAppInfo(url=config.WEBAPP_URL))
+        if config.WEBAPP_URL
+        else KeyboardButton(text="Статистика")
+    )
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Новая задача"), dashboard_btn],
+            [KeyboardButton(text="Мои задачи"),   KeyboardButton(text="Настройки")],
+        ],
+        resize_keyboard=True,
+    )
+
+_ADMIN_KB = _make_admin_kb()
 
 # ── Каналы — замените названия и ссылки на свои ───────────────────────────────
 CHANNELS = [

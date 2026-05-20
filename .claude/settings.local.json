@@ -13,7 +13,12 @@
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
       "Bash(git push *)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(echo \"exit:$?\")",
+      "Bash(python *)",
+      "Bash(git -c user.email=batilgereevkamal@gmail.com -c user.name=Kamal commit -m ' *)",
+      "Bash(git -c user.email=\"batilgereevkamal@gmail.com\" -c user.name=\"Kamal\" add scheduler.py)",
+      "Bash(git -c user.email=\"batilgereevkamal@gmail.com\" -c user.name=\"Kamal\" add bot.py)"
     ]
   }
 }

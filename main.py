@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -12,6 +13,7 @@ import config
 import database as db
 from bot import router
 from scheduler import check_deadlines, morning_digest, evening_summary
+from webapp import create_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,10 +53,18 @@ async def main() -> None:
     me = await bot.get_me()
     logger.info("Бот: @%s | Модель: %s | Админ: %d", me.username, config.CLAUDE_MODEL, config.ADMIN_ID)
 
+    webapp = create_app()
+    runner = web.AppRunner(webapp)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", config.WEBAPP_PORT)
+    await site.start()
+    logger.info("WebApp: http://0.0.0.0:%d", config.WEBAPP_PORT)
+
     try:
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
         scheduler.shutdown()
+        await runner.cleanup()
         await bot.session.close()
 
 
